@@ -1,0 +1,16 @@
+[project]
+name = "mobility"
+version = "0.1.0"
+description = "Unified EV charging simulation pipeline (cars, buses, coaches)"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mobility*"]
