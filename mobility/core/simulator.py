@@ -26,10 +26,13 @@ import numpy as np
 import pandas as pd
 
 from .constants import (
+    CV_THRESHOLD,
+    DEFAULT_CHEMISTRY,
     SOC_SAFETY_MARGIN,
     STEP_HOURS_PROFILE,
     STEPS_PER_DAY_DECISION,
     STEPS_PER_DAY_PROFILE,
+    WARMUP_DAYS,
 )
 from .data_structures import DailySchedule
 
@@ -37,10 +40,6 @@ STEPS_PER_DAY = STEPS_PER_DAY_DECISION
 STEP_HOURS = 24.0 / STEPS_PER_DAY
 MINUTES_PER_HOUR = 60.0
 MINUTES_PER_DAY = 24.0 * MINUTES_PER_HOUR
-
-# CC-CV threshold: below this SOC, charge at full power (CC phase);
-# above it, power tapers linearly to zero at SOC=1.0 (CV phase approximation).
-CV_THRESHOLD = 0.8
 
 # Pre-computed step boundaries (shape: (96,) each)
 _STEP_STARTS = np.arange(STEPS_PER_DAY, dtype=float) * STEP_HOURS
@@ -169,10 +168,13 @@ def simulate_single_day(
     schedule: DailySchedule,
     battery_capacity_kwh: float,
     soc_start: float = 1.0,
+    *,
+    cv_threshold: float = CV_THRESHOLD[DEFAULT_CHEMISTRY],
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """Simulate one EV for one day under uncontrolled charging.
 
-    Returns (soc_profile[96], load_profile[96], soc_end).
+    Returns (soc_profile[96], load_profile[96], soc_end). ``cv_threshold`` is
+    the CC-CV linear taper start SOC.
     """
     soc_profile = np.zeros(STEPS_PER_DAY)
     load_profile = np.zeros(STEPS_PER_DAY)
@@ -214,6 +216,7 @@ def simulate_single_day(
         soc_start,
         soc_profile,
         load_profile,
+        cv_threshold,
     )
 
     _fill_session_soc(
@@ -237,6 +240,7 @@ def _soc_walk(
     soc_start: float,
     soc_out: np.ndarray,
     load_out: np.ndarray,
+    cv_threshold: float,
 ) -> None:
     """Tight SOC walk loop kept separate for possible future acceleration."""
     inv_cap = 1.0 / cap if cap > 0 else 0.0
@@ -251,10 +255,10 @@ def _soc_walk(
         # Charge (CC-CV: linear power taper above CV_THRESHOLD)
         pp = park_power[step]
         if pp > 0.0:
-            if soc < CV_THRESHOLD:
+            if soc < cv_threshold:
                 eff_pp = pp
             else:
-                factor = (1.0 - soc) / (1.0 - CV_THRESHOLD)
+                factor = (1.0 - soc) / (1.0 - cv_threshold)
                 if factor < 0.0:
                     factor = 0.0
                 eff_pp = pp * factor
@@ -268,29 +272,86 @@ def _soc_walk(
         soc_out[step] = soc
 
 
+def _validate_warm_up_days(
+    daily_schedules: List[DailySchedule],
+    warm_up_days: int,
+) -> int:
+    """Validate the warm-up window for a multi-day simulation."""
+    if warm_up_days < 0:
+        raise ValueError("warm_up_days must be non-negative.")
+    if warm_up_days >= len(daily_schedules):
+        raise ValueError("warm_up_days must be smaller than len(daily_schedules).")
+    return int(warm_up_days)
+
+
 def simulate_single_ev(
     daily_schedules: List[DailySchedule],
     battery_capacity_kwh: float,
     soc_init: float = 1.0,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Simulate one EV over multiple days. Returns (soc_all, load_all)."""
+    *,
+    warm_up_days: int = WARMUP_DAYS,
+    chemistry: str = DEFAULT_CHEMISTRY,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Return (soc_post, load_post, soc_after_warmup).
+
+    - ``warm_up_days == 0``: no warm-up. ``soc_after_warmup`` equals
+      ``soc_init`` and the returned arrays remain bit-identical to the
+      pre-Stage-3 multi-day wrapper.
+    - ``0 < warm_up_days < len(daily_schedules)``: the first
+      ``warm_up_days`` days are simulated to drive SOC burn-in, but their
+      SOC/load arrays are discarded. ``soc_after_warmup`` is the SOC at the
+      start of the first retained day, i.e. the final SOC after the last
+      warm-up day.
+    - ``warm_up_days >= len(daily_schedules)`` or negative values raise
+      ``ValueError``.
+
+    Warm-up days still mutate ``ParkingEvent`` in place through
+    ``_fill_session_soc`` and ``compute_next_trip_soc_floor``. Callers that
+    inspect session-level fields such as ``energy_charged_kwh`` must apply
+    their own ``sched.day >= warm_up_days`` filtering if they only want the
+    steady-state portion.
+    """
+    warm_up_days = _validate_warm_up_days(daily_schedules, warm_up_days)
+    try:
+        cv_threshold = CV_THRESHOLD[chemistry]
+    except KeyError:
+        raise ValueError(
+            f"Unknown chemistry {chemistry!r}; expected one of {sorted(CV_THRESHOLD)}."
+        ) from None
     num_days = len(daily_schedules)
-    soc_all = np.empty(num_days * STEPS_PER_DAY)
-    load_all = np.empty(num_days * STEPS_PER_DAY)
+    retained_days = num_days - warm_up_days
+    soc_all = np.empty(retained_days * STEPS_PER_DAY)
+    load_all = np.empty(retained_days * STEPS_PER_DAY)
     soc = soc_init
+    soc_after_warmup = float(soc_init)
 
     for day_index, schedule in enumerate(daily_schedules):
-        start = day_index * STEPS_PER_DAY
-        end = start + STEPS_PER_DAY
         soc_day, load_day, soc = simulate_single_day(
             schedule,
             battery_capacity_kwh,
             soc_start=soc,
+            cv_threshold=cv_threshold,
         )
+
+        if warm_up_days == 0:
+            start = day_index * STEPS_PER_DAY
+            end = start + STEPS_PER_DAY
+            soc_all[start:end] = soc_day
+            load_all[start:end] = load_day
+            continue
+
+        if day_index < warm_up_days:
+            if day_index == warm_up_days - 1:
+                soc_after_warmup = float(soc)
+            continue
+
+        retained_day_index = day_index - warm_up_days
+        start = retained_day_index * STEPS_PER_DAY
+        end = start + STEPS_PER_DAY
         soc_all[start:end] = soc_day
         load_all[start:end] = load_day
 
-    return soc_all, load_all
+    return soc_all, load_all, soc_after_warmup
 
 
 def simulate_fleet(
@@ -298,6 +359,9 @@ def simulate_fleet(
     ev_fleet: pd.DataFrame,
     soc_init: float = 1.0,
     progress_interval: int = 0,
+    *,
+    warm_up_days: int = WARMUP_DAYS,
+    chemistry_default: str = DEFAULT_CHEMISTRY,
 ) -> Dict[str, dict]:
     """Simulate the entire fleet.
 
@@ -307,21 +371,51 @@ def simulate_fleet(
     ev_fleet : DataFrame with EV_ID, battery_capacity_kwh
     soc_init : initial SOC for all EVs
     progress_interval : print progress every N EVs (0 = silent)
+    warm_up_days : number of leading days used only for SOC burn-in
+    chemistry_default : fallback chemistry when ev_fleet has no chemistry
+    column or a per-EV chemistry value is missing/NaN
 
     Returns
     -------
-    results : dict ev_id -> {"soc": ndarray, "load": ndarray}
+    results : dict ev_id -> {"soc": ndarray, "load": ndarray, "soc_after_warmup": float}
+
+    Warm-up days still run the in-place ParkingEvent SOC/energy backfill even
+    though their arrays are stripped from the returned steady-state profiles.
+    A per-EV ``chemistry`` column on ``ev_fleet`` is optional.
     """
     battery_map = dict(zip(ev_fleet["EV_ID"], ev_fleet["battery_capacity_kwh"]))
+    chemistry_map = None
+    if "chemistry" in ev_fleet.columns:
+        chemistry_map = dict(zip(ev_fleet["EV_ID"], ev_fleet["chemistry"]))
     results: Dict[str, dict] = {}
     total = len(fleet_schedules)
 
     for index, (ev_id, schedules) in enumerate(fleet_schedules.items(), 1):
+        if len(schedules) <= warm_up_days:
+            raise ValueError(
+                f"EV {ev_id} has len(schedules)={len(schedules)} which must be greater "
+                f"than warm_up_days={warm_up_days}."
+            )
         cap = battery_map.get(ev_id, 60.0)
         if cap is None or (isinstance(cap, float) and np.isnan(cap)) or cap <= 0:
             cap = 60.0
-        soc_arr, load_arr = simulate_single_ev(schedules, cap, soc_init)
-        results[ev_id] = {"soc": soc_arr, "load": load_arr}
+        chemistry = chemistry_default
+        if chemistry_map is not None:
+            chemistry_value = chemistry_map.get(ev_id, chemistry_default)
+            if not pd.isna(chemistry_value):
+                chemistry = str(chemistry_value)
+        soc_arr, load_arr, soc_after_warmup = simulate_single_ev(
+            schedules,
+            cap,
+            soc_init,
+            warm_up_days=warm_up_days,
+            chemistry=chemistry,
+        )
+        results[ev_id] = {
+            "soc": soc_arr,
+            "load": load_arr,
+            "soc_after_warmup": float(soc_after_warmup),
+        }
 
         if progress_interval > 0 and (index % progress_interval == 0 or index == total):
             print(f"  Simulated {index:,}/{total:,} EVs", flush=True)

@@ -30,7 +30,7 @@ NTS_PURPOSE_MAP = {
     14: "holiday",              # Holiday: base
     15: "leisure",              # Day trip / just walk
     16: "leisure",              # Other non-escort
-    17: "home",                 # Escort home
+    17: "personal_business",    # Escort home (drop someone at THEIR home != driver's home)
     18: "work",                 # Escort work
     19: "work",                 # Escort in course of work
     20: "education",            # Escort education

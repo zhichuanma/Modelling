@@ -14,6 +14,7 @@ Unit conventions
     time    -> _h or _min
 """
 
+import datetime as dt
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -29,6 +30,7 @@ class EVSpec:
     consumption_kwh_per_km: float   # derived: battery_capacity_kwh / assumed_range_km
     max_onboard_charger_kw: float   # AC_Power_kW from data
     home_charger_kw: float = 7.0    # default home wallbox
+    chemistry: str = "NMC"
 
 
 @dataclass
@@ -42,6 +44,10 @@ class Trip:
     origin_purpose: str             # mapped label, e.g. "home", "work"
     destination_purpose: str        # mapped label
     energy_consumed_kwh: float = 0.0  # filled by simulator
+    origin_lsoa: str = ""
+    destination_lsoa: str = ""
+    distance_km_nts: float = 0.0
+    fallback_distance: bool = False
 
 
 @dataclass
@@ -52,6 +58,7 @@ class ParkingEvent:
     end_time: float                 # hour of day (decimal)
     duration_hours: float
     location_purpose: str           # e.g. "home", "work", "shopping"
+    location_lsoa: str = ""
     soc_on_arrival: float = 0.0     # 0-1 fraction
     can_charge: bool = False
     matched_station_id: Optional[int] = None
@@ -70,3 +77,4 @@ class DailySchedule:
     day_type: str                   # "weekday" or "weekend"
     trips: List[Trip] = field(default_factory=list)
     parking_events: List[ParkingEvent] = field(default_factory=list)
+    date: Optional[dt.date] = None
