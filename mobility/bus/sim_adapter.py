@@ -1,167 +1,146 @@
-"""Bus-specific adapter around mobility.core.simulator.
-
-Each block from all_blocks.parquet becomes a single-day DailySchedule:
-- trips sorted by start_h; energy = distance_km * consumption_kwh_per_km
-- parking events before first trip and after last trip = depot time (can_charge)
-- mid-day layovers are parking events but cannot charge (opportunity charging off)
-"""
+"""Bus adapters around the vehicle-agnostic SOC simulator."""
 
 from __future__ import annotations
-
-from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
 
-from mobility.core.data_structures import DailySchedule, ParkingEvent, Trip
-from mobility.core.simulator import STEP_HOURS, STEPS_PER_DAY, simulate_single_day
+from mobility.core.constants import DEFAULT_CHEMISTRY, STEP_HOURS_DECISION, STEPS_PER_DAY_DECISION
+from mobility.core.simulator import simulate_single_ev
+
+from .trip_chain_bus import block_to_daily_schedules
 
 
-# Typical single-deck urban e-bus defaults (BYD ADL Enviro200EV class)
 DEFAULT_BATTERY_KWH = 300.0
 DEFAULT_CONSUMPTION_KWH_PER_KM = 1.2
-DEFAULT_DEPOT_CHARGE_KW = 100.0  # DC depot charger
+DEFAULT_DEPOT_CHARGE_KW = 100.0
 
 
-def block_to_daily_schedule(
+def _parking_energy_kwh(schedules, purpose: str) -> float:
+    return float(
+        sum(
+            event.energy_charged_kwh
+            for schedule in schedules
+            for event in schedule.parking_events
+            if event.location_purpose == purpose
+        )
+    )
+
+
+def simulate_block(
     block_df: pd.DataFrame,
-    ev_id: str,
-    consumption_kwh_per_km: float = DEFAULT_CONSUMPTION_KWH_PER_KM,
-    depot_charge_kw: float = DEFAULT_DEPOT_CHARGE_KW,
-    allow_layover_charging: bool = False,
-    layover_charge_kw: float = 0.0,
-) -> DailySchedule:
-    """Build a one-day DailySchedule for a single bus (one block_id).
-
-    Trips with start_h >= 24 or end_h >= 24 are dropped (overnight wrap).
-    """
-    df = block_df.sort_values("start_h").copy()
-    df = df[(df["start_h"] < 24.0) & (df["end_h"] < 24.0)]
-    if df.empty:
-        return DailySchedule(ev_id=ev_id, day=0, day_type="weekday")
-
-    sched = DailySchedule(ev_id=ev_id, day=0, day_type="weekday")
-    for _, r in df.iterrows():
-        dep = float(r["start_h"])
-        arr = float(r["end_h"])
-        if arr <= dep:
-            arr = dep + 0.05
-        sched.trips.append(Trip(
-            trip_id=str(r["trip_id"]),
-            departure_time=dep,
-            arrival_time=arr,
-            distance_km=float(r["distance_km"]),
-            origin_purpose="depot",
-            destination_purpose="depot",
-            energy_consumed_kwh=float(r["distance_km"]) * consumption_kwh_per_km,
-        ))
-
-    # Fix any overlap introduced by sorting/coercion
-    for i in range(1, len(sched.trips)):
-        prev, curr = sched.trips[i - 1], sched.trips[i]
-        if curr.departure_time < prev.arrival_time:
-            curr.departure_time = prev.arrival_time
-            if curr.arrival_time < curr.departure_time:
-                curr.arrival_time = curr.departure_time + 0.05
-
-    first = sched.trips[0]
-    last = sched.trips[-1]
-
-    # Depot parking: before the first trip
-    if first.departure_time > 0:
-        sched.parking_events.append(ParkingEvent(
-            start_time=0.0,
-            end_time=first.departure_time,
-            duration_hours=first.departure_time,
-            location_purpose="depot",
-            can_charge=True,
-            charge_power_kw=depot_charge_kw,
-        ))
-
-    # Mid-day layovers between trips
-    for i in range(len(sched.trips) - 1):
-        a = sched.trips[i].arrival_time
-        b = sched.trips[i + 1].departure_time
-        if b <= a:
-            continue
-        sched.parking_events.append(ParkingEvent(
-            start_time=a,
-            end_time=b,
-            duration_hours=b - a,
-            location_purpose="layover",
-            can_charge=allow_layover_charging,
-            charge_power_kw=layover_charge_kw if allow_layover_charging else 0.0,
-        ))
-
-    # Depot parking: after the last trip
-    if last.arrival_time < 24.0:
-        sched.parking_events.append(ParkingEvent(
-            start_time=last.arrival_time,
-            end_time=24.0,
-            duration_hours=24.0 - last.arrival_time,
-            location_purpose="depot",
-            can_charge=True,
-            charge_power_kw=depot_charge_kw,
-        ))
-
-    return sched
-
-
-def simulate_bus_fleet(
-    all_blocks: pd.DataFrame,
-    battery_kwh: float = DEFAULT_BATTERY_KWH,
-    consumption_kwh_per_km: float = DEFAULT_CONSUMPTION_KWH_PER_KM,
-    depot_charge_kw: float = DEFAULT_DEPOT_CHARGE_KW,
-    allow_layover_charging: bool = False,
-    layover_charge_kw: float = 0.0,
+    *,
+    battery_kwh: float,
+    consumption_kwh_per_km: float,
+    depot_charge_kw: float,
     soc_init: float = 1.0,
+    allow_layover_charging: bool = False,
+    layover_charge_kw: float = 0.0,
+    min_layover_for_charging_h: float = 0.0,
+    chemistry: str = DEFAULT_CHEMISTRY,
+) -> dict:
+    """Run one bus block end-to-end through schedule conversion and simulation."""
+    schedules = block_to_daily_schedules(
+        block_df,
+        ev_id=str(block_df["block_id"].iloc[0]) if "block_id" in block_df else "bus_block",
+        consumption_kwh_per_km=consumption_kwh_per_km,
+        depot_charge_kw=depot_charge_kw,
+        allow_layover_charging=allow_layover_charging,
+        layover_charge_kw=layover_charge_kw,
+        min_layover_for_charging_h=min_layover_for_charging_h,
+    )
+    soc, load_kw, _soc_after_warmup = simulate_single_ev(
+        schedules,
+        battery_kwh,
+        soc_init=soc_init,
+        warm_up_days=0,
+        chemistry=chemistry,
+    )
+    total_km = float(sum(trip.distance_km for schedule in schedules for trip in schedule.trips))
+    total_consumed_kwh = float(
+        sum(trip.energy_consumed_kwh for schedule in schedules for trip in schedule.trips)
+    )
+    energy_charged_kwh = float(np.sum(load_kw) * STEP_HOURS_DECISION)
+    depot_kwh = _parking_energy_kwh(schedules, "depot_terminus")
+    layover_kwh = _parking_energy_kwh(schedules, "layover")
+
+    return {
+        "schedules": schedules,
+        "soc": soc,
+        "load_kw": load_kw,
+        "soc_end": float(soc[-1]),
+        "soc_min": float(soc.min()),
+        "energy_charged_kwh": energy_charged_kwh,
+        "depot_kwh": depot_kwh,
+        "layover_kwh": layover_kwh,
+        "total_km": total_km,
+        "total_consumed_kwh": total_consumed_kwh,
+    }
+
+
+def _add_load(fleet_load_kw: np.ndarray, block_load_kw: np.ndarray) -> np.ndarray:
+    """Wrap multi-day block loads into a 96-step representative service day."""
+    n = STEPS_PER_DAY_DECISION
+    full_days = block_load_kw.shape[0] // n
+    for day_index in range(full_days):
+        start = day_index * n
+        fleet_load_kw += block_load_kw[start : start + n]
+
+    remainder = block_load_kw.shape[0] - (full_days * n)
+    if remainder > 0:
+        fleet_load_kw[:remainder] += block_load_kw[full_days * n :]
+    return fleet_load_kw
+
+
+def simulate_fleet_blocks(
+    df: pd.DataFrame,
+    *,
+    battery_kwh: float,
+    consumption_kwh_per_km: float,
+    depot_charge_kw: float,
     progress_interval: int = 0,
-) -> Tuple[pd.DataFrame, np.ndarray]:
-    """Run single-day SOC simulation over every block_id in all_blocks.
+    **kwargs,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Simulate all blocks and return per-block metrics plus aggregate load.
 
-    Returns:
-      per_bus : DataFrame indexed by block_id with km/day, energy/day, soc_end
-      fleet_load : ndarray shape (96,) — aggregated charging power (kW) in each 15-min step
+    Fleet load is aggregated as a single 96-step representative service day.
+    Cross-midnight blocks contribute their day-1 tail wrapped back to the same
+    hour-of-day on day 0, assuming steady-state service across consecutive days.
     """
-    groups = all_blocks.groupby("block_id", sort=False)
+    groups = df.groupby("block_id", sort=False)
+    fleet_load_kw = np.zeros(STEPS_PER_DAY_DECISION, dtype=float)
+    records: list[dict] = []
     total = len(groups)
-    records = []
-    fleet_load = np.zeros(STEPS_PER_DAY)
 
-    for i, (bid, g) in enumerate(groups, 1):
-        sched = block_to_daily_schedule(
-            g, ev_id=str(bid),
+    for index, (block_id, block_df) in enumerate(groups, 1):
+        result = simulate_block(
+            block_df,
+            battery_kwh=battery_kwh,
             consumption_kwh_per_km=consumption_kwh_per_km,
             depot_charge_kw=depot_charge_kw,
-            allow_layover_charging=allow_layover_charging,
-            layover_charge_kw=layover_charge_kw,
+            **kwargs,
         )
-        if not sched.trips:
-            continue
-        soc, load, soc_end = simulate_single_day(
-            sched, battery_capacity_kwh=battery_kwh, soc_start=soc_init
+        fleet_load_kw = _add_load(fleet_load_kw, result["load_kw"])
+        records.append(
+            {
+                "block_id": block_id,
+                "agency_id": block_df["agency_id"].iloc[0],
+                "block_source": block_df["block_source"].iloc[0],
+                "n_trips": int(len(block_df)),
+                "n_schedule_days": int(len(result["schedules"])),
+                "total_km": result["total_km"],
+                "total_consumed_kwh": result["total_consumed_kwh"],
+                "energy_charged_kwh": result["energy_charged_kwh"],
+                "depot_kwh": result["depot_kwh"],
+                "layover_kwh": result["layover_kwh"],
+                "soc_end": result["soc_end"],
+                "soc_min": result["soc_min"],
+            }
         )
-        fleet_load += load
-        total_km = sum(t.distance_km for t in sched.trips)
-        energy_demand = total_km * consumption_kwh_per_km
-        energy_charged = float(load.sum() * STEP_HOURS)
-        records.append({
-            "block_id": bid,
-            "agency_id": g["agency_id"].iloc[0],
-            "block_source": g["block_source"].iloc[0],
-            "n_trips": len(sched.trips),
-            "total_km": total_km,
-            "energy_demand_kwh": energy_demand,
-            "energy_charged_kwh": energy_charged,
-            "soc_end": soc_end,
-        })
-        if progress_interval and (i % progress_interval == 0 or i == total):
-            print(f"  {i:>7,}/{total:,} blocks", flush=True)
+        if progress_interval > 0 and (index % progress_interval == 0 or index == total):
+            print(f"  Simulated {index:,}/{total:,} bus blocks", flush=True)
 
-    per_bus = pd.DataFrame.from_records(records).set_index("block_id")
-    return per_bus, fleet_load
-
-
-def load_profile_times() -> np.ndarray:
-    """Return the 15-min step start times in decimal hours (0.0, 0.25, ..., 23.75)."""
-    return np.arange(STEPS_PER_DAY) * STEP_HOURS
+    per_block = pd.DataFrame.from_records(records)
+    if not per_block.empty:
+        per_block = per_block.set_index("block_id")
+    return per_block, fleet_load_kw
