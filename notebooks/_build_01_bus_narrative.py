@@ -58,13 +58,16 @@ cells.append(
         )
         from mobility.bus.trip_chain_bus import block_to_daily_schedules
         from mobility.bus.sim_adapter import simulate_block
+        from mobility.bus.vehicle_sampling import load_bus_vehicle_params, sample_bus_vehicle_specs
 
         BLOCKS_PATH = REPO_ROOT / "outputs" / "all_blocks.parquet"
+        VEHICLE_PARAMS_PATH = REPO_ROOT.parent / "Data" / "EV" / "EV_prepared" / "BEV_Bus_Coach_unique_with_params_with_AC.csv"
         MAIN_BUS_SEED = 20260430
         ALT_BUS_SEED = MAIN_BUS_SEED + 1
-        BUS_BATTERY_KWH = 300.0
-        BUS_CONSUMPTION_KWH_PER_KM = 1.2
-        DEPOT_CHARGE_KW = 100.0
+        VEHICLE_SEED = MAIN_BUS_SEED + 2
+        FALLBACK_BUS_BATTERY_KWH = 300.0
+        FALLBACK_BUS_CONSUMPTION_KWH_PER_KM = 1.2
+        FALLBACK_DEPOT_CHARGE_KW = 100.0
 
         plt.rcParams["figure.figsize"] = (12, 4.5)
         plt.rcParams["figure.dpi"] = 110
@@ -200,6 +203,28 @@ cells.append(
         protagonist_card = render_block_identity_card(all_blocks, protagonist_id)
         contrast_card = render_block_identity_card(all_blocks, contrast_id)
         display(pd.concat([protagonist_card.assign(role="protagonist"), contrast_card.assign(role="contrast")], ignore_index=True))
+
+        vehicle_params = load_bus_vehicle_params(VEHICLE_PARAMS_PATH, fallback_depot_charge_kw=FALLBACK_DEPOT_CHARGE_KW)
+        vehicle_rng = np.random.default_rng(VEHICLE_SEED)
+        protagonist_vehicle = sample_bus_vehicle_specs(vehicle_params, vehicle_rng, n=1).iloc[0]
+        BUS_BATTERY_KWH = float(protagonist_vehicle["battery_kwh"])
+        BUS_CONSUMPTION_KWH_PER_KM = float(protagonist_vehicle["consumption_kwh_per_km"])
+        DEPOT_CHARGE_KW = float(protagonist_vehicle["depot_charge_kw"])
+
+        vehicle_summary = pd.DataFrame(
+            [
+                ("source rows", vehicle_params.attrs["input_rows"]),
+                ("sampling rows", vehicle_params.attrs["sampling_rows"]),
+                ("stock coverage", f"{vehicle_params.attrs['stock_coverage_pct']:.1f}%"),
+                ("sampled make", protagonist_vehicle["make"]),
+                ("sampled model", protagonist_vehicle["gen_model"]),
+                ("battery_kwh", BUS_BATTERY_KWH),
+                ("consumption_kwh_per_km", BUS_CONSUMPTION_KWH_PER_KM),
+                ("depot_charge_kw", DEPOT_CHARGE_KW),
+            ],
+            columns=["metric", "value"],
+        )
+        display(vehicle_summary)
         """
     )
 )
@@ -359,8 +384,8 @@ cells.append(md("## F. Sensitivity grid"))
 cells.append(
     code(
         """
-        battery_grid = [200.0, 300.0, 400.0]
-        consumption_grid = [0.9, 1.2, 1.5]
+        battery_grid = sorted({round(BUS_BATTERY_KWH * factor, 1) for factor in [0.75, 1.0, 1.25]})
+        consumption_grid = sorted({round(BUS_CONSUMPTION_KWH_PER_KM * factor, 3) for factor in [0.75, 1.0, 1.25]})
         rows = []
         for battery_kwh in battery_grid:
             for consumption_kwh_per_km in consumption_grid:
@@ -418,6 +443,9 @@ cells.append(
                     "n_schedule_days": len(baseline["schedules"]),
                     "total_km": round(baseline["total_km"], 2),
                     "span_h": round(float(protagonist_block["end_h"].max() - protagonist_block["start_h"].min()), 2),
+                    "vehicle_make": protagonist_vehicle["make"],
+                    "vehicle_gen_model": protagonist_vehicle["gen_model"],
+                    "vehicle_stock_2025_q2": float(protagonist_vehicle["stock_2025_q2"]),
                     "depot_dwell_h": round(float(dwell_by_purpose.get("depot_terminus", 0.0)), 2),
                     "layover_dwell_h": round(float(dwell_by_purpose.get("layover", 0.0)), 2),
                     "total_consumed_kwh": round(baseline["total_consumed_kwh"], 2),

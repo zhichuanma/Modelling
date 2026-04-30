@@ -3,6 +3,7 @@
 from .data_loader import filter_to_clean_blocks, load_all_blocks, summarize_block_quality
 from .selection import render_block_identity_card, sample_contrast_block, sample_protagonist_block
 from .sim_adapter import simulate_block, simulate_fleet_blocks
+from .vehicle_sampling import load_bus_vehicle_params, sample_bus_vehicle_specs
 
 __all__ = [
     "load_all_blocks",
@@ -13,4 +14,6 @@ __all__ = [
     "sample_protagonist_block",
     "sample_contrast_block",
     "render_block_identity_card",
+    "load_bus_vehicle_params",
+    "sample_bus_vehicle_specs",
 ]

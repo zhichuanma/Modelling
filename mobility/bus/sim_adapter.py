@@ -9,6 +9,7 @@ from mobility.core.constants import DEFAULT_CHEMISTRY, STEP_HOURS_DECISION, STEP
 from mobility.core.simulator import simulate_single_ev
 
 from .trip_chain_bus import block_to_daily_schedules
+from .vehicle_sampling import sample_bus_vehicle_specs
 
 
 DEFAULT_BATTERY_KWH = 300.0
@@ -75,6 +76,9 @@ def simulate_block(
         "layover_kwh": layover_kwh,
         "total_km": total_km,
         "total_consumed_kwh": total_consumed_kwh,
+        "battery_kwh": float(battery_kwh),
+        "consumption_kwh_per_km": float(consumption_kwh_per_km),
+        "depot_charge_kw": float(depot_charge_kw),
     }
 
 
@@ -95,9 +99,11 @@ def _add_load(fleet_load_kw: np.ndarray, block_load_kw: np.ndarray) -> np.ndarra
 def simulate_fleet_blocks(
     df: pd.DataFrame,
     *,
-    battery_kwh: float,
-    consumption_kwh_per_km: float,
-    depot_charge_kw: float,
+    battery_kwh: float | None = None,
+    consumption_kwh_per_km: float | None = None,
+    depot_charge_kw: float | None = None,
+    vehicle_params: pd.DataFrame | None = None,
+    vehicle_rng: np.random.Generator | None = None,
     progress_interval: int = 0,
     **kwargs,
 ) -> tuple[pd.DataFrame, np.ndarray]:
@@ -108,35 +114,74 @@ def simulate_fleet_blocks(
     hour-of-day on day 0, assuming steady-state service across consecutive days.
     """
     groups = df.groupby("block_id", sort=False)
+    block_ids = list(groups.groups)
+    sampled_specs: dict[object, pd.Series] = {}
+    if vehicle_params is not None:
+        if vehicle_rng is None:
+            raise ValueError("vehicle_rng must be provided when vehicle_params is used.")
+        sampled = sample_bus_vehicle_specs(vehicle_params, vehicle_rng, n=len(block_ids))
+        sampled.insert(0, "block_id", block_ids)
+        sampled_specs = {
+            row["block_id"]: row
+            for _, row in sampled.iterrows()
+        }
+    elif battery_kwh is None or consumption_kwh_per_km is None or depot_charge_kw is None:
+        raise ValueError(
+            "Provide either vehicle_params + vehicle_rng or fixed battery_kwh, "
+            "consumption_kwh_per_km, and depot_charge_kw."
+        )
+
     fleet_load_kw = np.zeros(STEPS_PER_DAY_DECISION, dtype=float)
     records: list[dict] = []
     total = len(groups)
 
     for index, (block_id, block_df) in enumerate(groups, 1):
+        vehicle_spec = sampled_specs.get(block_id)
+        block_battery_kwh = float(vehicle_spec["battery_kwh"]) if vehicle_spec is not None else float(battery_kwh)
+        block_consumption_kwh_per_km = (
+            float(vehicle_spec["consumption_kwh_per_km"])
+            if vehicle_spec is not None
+            else float(consumption_kwh_per_km)
+        )
+        block_depot_charge_kw = (
+            float(vehicle_spec["depot_charge_kw"])
+            if vehicle_spec is not None
+            else float(depot_charge_kw)
+        )
         result = simulate_block(
             block_df,
-            battery_kwh=battery_kwh,
-            consumption_kwh_per_km=consumption_kwh_per_km,
-            depot_charge_kw=depot_charge_kw,
+            battery_kwh=block_battery_kwh,
+            consumption_kwh_per_km=block_consumption_kwh_per_km,
+            depot_charge_kw=block_depot_charge_kw,
             **kwargs,
         )
         fleet_load_kw = _add_load(fleet_load_kw, result["load_kw"])
-        records.append(
-            {
-                "block_id": block_id,
-                "agency_id": block_df["agency_id"].iloc[0],
-                "block_source": block_df["block_source"].iloc[0],
-                "n_trips": int(len(block_df)),
-                "n_schedule_days": int(len(result["schedules"])),
-                "total_km": result["total_km"],
-                "total_consumed_kwh": result["total_consumed_kwh"],
-                "energy_charged_kwh": result["energy_charged_kwh"],
-                "depot_kwh": result["depot_kwh"],
-                "layover_kwh": result["layover_kwh"],
-                "soc_end": result["soc_end"],
-                "soc_min": result["soc_min"],
-            }
-        )
+        record = {
+            "block_id": block_id,
+            "agency_id": block_df["agency_id"].iloc[0],
+            "block_source": block_df["block_source"].iloc[0],
+            "n_trips": int(len(block_df)),
+            "n_schedule_days": int(len(result["schedules"])),
+            "total_km": result["total_km"],
+            "total_consumed_kwh": result["total_consumed_kwh"],
+            "energy_charged_kwh": result["energy_charged_kwh"],
+            "depot_kwh": result["depot_kwh"],
+            "layover_kwh": result["layover_kwh"],
+            "soc_end": result["soc_end"],
+            "soc_min": result["soc_min"],
+            "battery_kwh": block_battery_kwh,
+            "consumption_kwh_per_km": block_consumption_kwh_per_km,
+            "depot_charge_kw": block_depot_charge_kw,
+        }
+        if vehicle_spec is not None:
+            record.update(
+                {
+                    "vehicle_make": str(vehicle_spec["make"]),
+                    "vehicle_gen_model": str(vehicle_spec["gen_model"]),
+                    "vehicle_stock_2025_q2": float(vehicle_spec["stock_2025_q2"]),
+                }
+            )
+        records.append(record)
         if progress_interval > 0 and (index % progress_interval == 0 or index == total):
             print(f"  Simulated {index:,}/{total:,} bus blocks", flush=True)
 

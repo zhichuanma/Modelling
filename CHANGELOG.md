@@ -16,3 +16,10 @@ All notable changes to the Modelling package.
 - Removed the legacy single-day `mobility/bus/sim_adapter.py` and the stale
   `outputs/sim_per_bus.parquet` / `sim_fleet_load_kw.npy` / `sim_fleet_load.csv`
   artifacts - they were built before the cross-midnight fix.
+
+## Bus vehicle-parameter sampling (2026-04-30)
+- Added weighted sampling from `BEV_Bus_Coach_unique_with_params_with_AC.csv`
+  so simulated bus blocks can use heterogeneous battery, consumption, and
+  depot charging parameters instead of a single fixed vehicle.
+- Updated `notebooks/01_single_bus_simulation.ipynb` to sample the protagonist
+  bus model from the prepared vehicle table using `2025 Q2` stock weights.
