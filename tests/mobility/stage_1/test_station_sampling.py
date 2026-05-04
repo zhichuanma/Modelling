@@ -155,7 +155,7 @@ def test_same_lsoa_dominates_far_higher_attr_neighbor() -> None:
     assert freq[0] > 0.9999
 
 
-def test_tier2_fallback_uses_same_lsoa_other_label() -> None:
+def test_same_lsoa_picks_regardless_of_label() -> None:
     schedule = _build_schedule(
         parking_events=[ParkingEvent(9.0, 12.0, 3.0, "work", location_lsoa="A")]
     )
@@ -182,6 +182,35 @@ def test_tier2_fallback_uses_same_lsoa_other_label() -> None:
     event = schedule.parking_events[0]
     assert event.can_charge is True
     assert event.matched_station_id == 10
+
+
+def test_same_lsoa_with_mismatched_labels_still_matches_station() -> None:
+    schedule = _build_schedule(
+        parking_events=[ParkingEvent(9.0, 12.0, 3.0, "holiday", location_lsoa="A")]
+    )
+    stations_df = pd.DataFrame(
+        {
+            "lsoa_code": ["A", "A"],
+            "label": ["work", "shopping"],
+            "StationID": [11, 12],
+            "TotalCapacity_kW": [22.0, 11.0],
+            "station_attractiveness": [0.2, 0.8],
+        }
+    )
+
+    match_stations_for_schedule(
+        schedule=schedule,
+        ev_home_lsoa="A",
+        ev_ac_power_kw=7.0,
+        stations_df=stations_df,
+        rng=np.random.default_rng(0),
+        centroids=_build_centroids(),
+        date_iso="day000",
+    )
+
+    event = schedule.parking_events[0]
+    assert event.can_charge is True
+    assert event.matched_station_id in {11, 12}
 
 
 def test_tier3_fallback_uses_neighbor_lsoa() -> None:
@@ -212,6 +241,36 @@ def test_tier3_fallback_uses_neighbor_lsoa() -> None:
     event = schedule.parking_events[0]
     assert event.can_charge is True
     assert event.matched_station_id == 20
+
+
+def test_neighbor_fallback_ignores_label_mismatch() -> None:
+    schedule = _build_schedule(
+        parking_events=[ParkingEvent(9.0, 12.0, 3.0, "holiday", location_lsoa="A")]
+    )
+    stations_df = pd.DataFrame(
+        {
+            "lsoa_code": ["B"],
+            "label": ["work"],
+            "StationID": [21],
+            "TotalCapacity_kW": [11.0],
+            "station_attractiveness": [1.0],
+        }
+    )
+
+    match_stations_for_schedule(
+        schedule=schedule,
+        ev_home_lsoa="A",
+        ev_ac_power_kw=7.0,
+        stations_df=stations_df,
+        rng=np.random.default_rng(0),
+        centroids=_build_centroids(),
+        neighbor_buffer_lsoas={"A": ["B"]},
+        date_iso="day000",
+    )
+
+    event = schedule.parking_events[0]
+    assert event.can_charge is True
+    assert event.matched_station_id == 21
 
 
 def test_empty_pool_marks_event_as_cannot_charge() -> None:
@@ -304,6 +363,23 @@ def test_power_cap_and_empty_location_lsoa_fallback_to_home() -> None:
     assert event.can_charge is True
     assert event.matched_station_id == 50
     assert event.charge_power_kw == 7.0
+
+
+def test_build_indices_keeps_rows_with_missing_label() -> None:
+    stations_df = pd.DataFrame(
+        {
+            "lsoa_code": ["A"],
+            "label": [np.nan],
+            "StationID": [60],
+            "TotalCapacity_kW": [7.0],
+            "station_attractiveness": [1.0],
+        }
+    )
+
+    indices = _build_lsoa_indices(stations_df)
+
+    assert indices["by_lsoa"]["A"].tolist() == [0]
+    assert indices["sid"].tolist() == [60]
 
 
 def test_distance_helper_matches_intra_lsoa_and_centroid_distance() -> None:

@@ -112,14 +112,36 @@ def chain_to_daily_schedule(
     jitter_minutes: float = 10.0,
     *,
     home_lsoa: str = "",
+    start_lsoa: str = "",
     sampler: Optional[DestinationSampler] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> DailySchedule:
-    """Convert one ChainTuple into a DailySchedule."""
+    """Convert one ChainTuple into a DailySchedule.
+
+    Day-start LSOA selection (home-detection branching)
+    ---------------------------------------------------
+    ``start_lsoa`` carries the previous day's overnight LSOA, threaded by
+    ``assign_year_schedules`` / ``assign_chains_to_fleet``. It is only used
+    when the NTS chain itself declares a non-home origin for today's first
+    trip (``chain[0].purpose_from != "home"``), i.e. NTS recorded a true
+    overnight stay away from home (~6.7% of day boundaries empirically).
+
+    When NTS declares ``purpose_from == "home"`` for today's first trip,
+    we treat that as the source of truth — even if the previous day ended
+    away from home. This preserves NTS's "silent return" semantics for the
+    ~3% of day boundaries where the diary implicitly assumes the person
+    returned home overnight without recording the return trip. Forcing
+    physical continuity here would contradict the NTS field.
+
+    ``start_lsoa`` is also ignored when empty (day 0, or previous day had
+    no parking/trips), falling back to ``home_lsoa``.
+    """
     schedule = DailySchedule(ev_id=ev_id, day=day, day_type=day_type)
     local_rng = rng if rng is not None else np.random.default_rng()
     use_layer1 = sampler is not None and home_lsoa != ""
-    current_lsoa = home_lsoa
+    nts_declares_home_start = bool(chain) and chain[0][3] == "home"
+    day_start_lsoa = home_lsoa if nts_declares_home_start or not start_lsoa else start_lsoa
+    current_lsoa = day_start_lsoa
 
     for dep_t, arr_t, dist_km, p_from, p_to in chain:
         dep = _add_time_jitter(dep_t, jitter_minutes, rng=local_rng)
@@ -198,7 +220,7 @@ def chain_to_daily_schedule(
             if curr.arrival_time < curr.departure_time:
                 curr.arrival_time = curr.departure_time + 0.05
 
-    _generate_parking_events(schedule, home_lsoa=home_lsoa if use_layer1 else "")
+    _generate_parking_events(schedule, start_lsoa=day_start_lsoa if use_layer1 else "")
     return schedule
 
 
@@ -299,6 +321,7 @@ def assign_year_schedules(
         home_lsoa = str(ev_row["resolved_home_lsoa"])
 
         daily_schedules: List[DailySchedule] = []
+        prev_overnight_lsoa = ""
         for week_idx in range(n_weeks):
             week_start = monday_of_year_1 + dt.timedelta(days=7 * week_idx)
             is_holiday_week = holiday_rules.is_holiday_week(week_start, region)
@@ -323,6 +346,7 @@ def assign_year_schedules(
                     consumption_kwh_per_km=consumption_kwh_per_km,
                     jitter_minutes=jitter_minutes,
                     home_lsoa=home_lsoa,
+                    start_lsoa=prev_overnight_lsoa,
                     sampler=sampler,
                     rng=rng,
                 )
@@ -333,6 +357,15 @@ def assign_year_schedules(
                         for trip in sched.trips:
                             trip.energy_consumed_kwh *= factor
                 daily_schedules.append(sched)
+
+                overnight = next(
+                    (event for event in reversed(sched.parking_events) if event.end_time >= 24.0),
+                    None,
+                )
+                if overnight is not None:
+                    prev_overnight_lsoa = overnight.location_lsoa
+                elif sched.trips:
+                    prev_overnight_lsoa = sched.trips[-1].destination_lsoa
 
         _smooth_cross_day_parking(daily_schedules)
         fleet_schedules[ev_id] = daily_schedules
@@ -346,7 +379,7 @@ def assign_year_schedules(
 def _generate_parking_events(
     schedule: DailySchedule,
     *,
-    home_lsoa: str = "",
+    start_lsoa: str = "",
 ) -> None:
     """Fill parking_events for a DailySchedule based on its trips."""
     trips = schedule.trips
@@ -361,7 +394,7 @@ def _generate_parking_events(
                 end_time=first_trip.departure_time,
                 duration_hours=first_trip.departure_time,
                 location_purpose=first_trip.origin_purpose,
-                location_lsoa=home_lsoa,
+                location_lsoa=start_lsoa,
             )
         )
 
@@ -447,6 +480,7 @@ def assign_chains_to_fleet(
             consumption = float(c)
 
         daily_schedules: List[DailySchedule] = []
+        prev_overnight_lsoa = ""
         for day_idx in range(num_days):
             dt = day_types[day_idx]
             if dt == "weekend":
@@ -462,10 +496,20 @@ def assign_chains_to_fleet(
                 consumption_kwh_per_km=consumption,
                 jitter_minutes=jitter_minutes,
                 home_lsoa=str(home_lsoas[i]),
+                start_lsoa=prev_overnight_lsoa,
                 sampler=sampler,
                 rng=local_rng,
             )
             daily_schedules.append(schedule)
+
+            overnight = next(
+                (event for event in reversed(schedule.parking_events) if event.end_time >= 24.0),
+                None,
+            )
+            if overnight is not None:
+                prev_overnight_lsoa = overnight.location_lsoa
+            elif schedule.trips:
+                prev_overnight_lsoa = schedule.trips[-1].destination_lsoa
 
         _smooth_cross_day_parking(daily_schedules)
         fleet_schedules[ev_id] = daily_schedules
@@ -528,15 +572,15 @@ def _smooth_cross_day_parking(daily_schedules: List[DailySchedule]) -> None:
         prev = daily_schedules[d - 1]
         curr = daily_schedules[d]
 
-        if prev.parking_events:
-            overnight_loc = prev.parking_events[-1].location_purpose
-        elif prev.trips:
-            overnight_loc = prev.trips[-1].destination_purpose
-        else:
+        if not curr.trips:
             continue
 
-        if curr.parking_events and curr.parking_events[0].start_time == 0.0:
-            curr.parking_events[0].location_purpose = overnight_loc
+        overnight_event = next(
+            (event for event in reversed(prev.parking_events) if event.end_time >= 24.0),
+            None,
+        )
+        if overnight_event is None:
+            continue
 
-        if curr.trips:
-            curr.trips[0].origin_purpose = overnight_loc
+        overnight_event.location_purpose = curr.trips[0].origin_purpose
+        overnight_event.location_lsoa = curr.trips[0].origin_lsoa

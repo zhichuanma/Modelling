@@ -2,6 +2,27 @@
 
 All notable changes to the Modelling package.
 
+## Passenger-car cross-day continuity and Layer 2 label removal (2026-05-04)
+- Reversed passenger-car cross-day smoothing so `day N+1` remains the NTS source
+  of truth and only the overnight parking event on `day N` is aligned to the next
+  day's declared origin `purpose` and `lsoa`.
+- Added upstream `start_lsoa` injection to passenger-car day assembly so days
+  that explicitly begin away from home now seed Layer-1 sampling, distances,
+  and morning parking from the prior overnight LSOA instead of hard-coding
+  `home_lsoa`.
+- Tightened the overnight update to only touch parking events whose `end_time >= 24.0`,
+  skipping late-arrival edge cases where no overnight parking event exists.
+- Removed Layer-2 station matching's implicit dependency on station `label` for
+  non-home parking, so same-LSOA and neighbor-LSOA fallback now sample from all
+  stations in the candidate LSOAs while preserving existing Huff weighting and
+  home-charging short-circuit behaviour.
+- Added regression tests for true-overstay, declared-return-home, and naturally
+  consistent cross-day boundaries, plus Layer-2 tests covering label-mismatched
+  same-LSOA and neighbor fallback and missing-label station rows.
+- Added upstream-injection tests for true overnight threading, silent-return
+  suppression, and day-0 home fallback; no Stage-2d numeric baseline refresh
+  was needed because the existing suite has no fixed-value snapshots here.
+
 ## Bus module redesign - single-bus narrative (2026-04-30)
 - Rebuilt `mobility/bus/` around `DailySchedule` semantics consistent with `mobility/cars/`.
 - `trip_chain_bus.block_to_daily_schedules` correctly handles the 9.5% of blocks

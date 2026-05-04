@@ -21,21 +21,16 @@ from mobility.core.spatial import load_lsoa_centroids, od_distance_km
 
 def _build_lsoa_indices(stations_df: pd.DataFrame) -> dict:
     """Build reusable Layer-2 sampling indices from the full station table."""
-    valid = stations_df.dropna(
-        subset=["lsoa_code", "label", "station_attractiveness"]
-    ).copy().reset_index(drop=True)
+    valid = stations_df.dropna(subset=["lsoa_code", "station_attractiveness"]).copy().reset_index(
+        drop=True
+    )
 
-    by_lsoa_label = {
-        (key[0], key[1]): np.asarray(row_idx, dtype=np.int64)
-        for key, row_idx in valid.groupby(["lsoa_code", "label"], sort=False).indices.items()
-    }
     by_lsoa = {
         key: np.asarray(row_idx, dtype=np.int64)
         for key, row_idx in valid.groupby("lsoa_code", sort=False).indices.items()
     }
 
     return {
-        "by_lsoa_label": by_lsoa_label,
         "by_lsoa": by_lsoa,
         "sid": valid["StationID"].to_numpy(dtype=np.int64, copy=True),
         "cap": valid["TotalCapacity_kW"].to_numpy(dtype=np.float64, copy=True),
@@ -82,9 +77,7 @@ def _match_one(
 
     pe_lsoa = pe.location_lsoa or ev_home_lsoa
 
-    rows = idx["by_lsoa_label"].get((pe_lsoa, pe.location_purpose))
-    if rows is None or len(rows) == 0:
-        rows = idx["by_lsoa"].get(pe_lsoa)
+    rows = idx["by_lsoa"].get(pe_lsoa)
 
     if (rows is None or len(rows) == 0) and neighbor_buffer_lsoas is not None:
         pool = []
