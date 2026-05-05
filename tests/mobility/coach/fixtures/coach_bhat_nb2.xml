@@ -1,0 +1,567 @@
+<?xml version='1.0' encoding='utf-8'?>
+<TransXChange xmlns="http://www.transxchange.org.uk/"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" CreationDateTime="2026-04-17T12:05:04"
+  ModificationDateTime="2026-04-17T12:15:04" Modification="revise" RevisionNumber="1"
+  FileName="BHAT-New_Bharat_Coaches_Southall_London-NB2-Priory_Way_Southall_Norwood_Green-Coach_Park_Wolverhampton.xml"
+  SchemaVersion="2.4" RegistrationDocument="false"
+  xsi:schemaLocation="http://www.transxchange.org.uk/ http://www.transxchange.org.uk/schema/2.4/TransXChange_general.xsd">
+  <StopPoints>
+    <AnnotatedStopPointRef>
+      <StopPointRef>490002205ZC</StopPointRef>
+      <CommonName>Priory Way / Southall</CommonName>
+      <Indicator>-&gt;SE</Indicator>
+      <LocalityName>Norwood Green</LocalityName>
+      <LocalityQualifier>Southall</LocalityQualifier>
+    </AnnotatedStopPointRef>
+    <AnnotatedStopPointRef>
+      <StopPointRef>03700337</StopPointRef>
+      <CommonName>Wellington Street stop W</CommonName>
+      <Indicator>Stop W</Indicator>
+      <LocalityName>Slough Town Centre</LocalityName>
+      <LocalityQualifier>Slough</LocalityQualifier>
+    </AnnotatedStopPointRef>
+    <AnnotatedStopPointRef>
+      <StopPointRef>43000005003</StopPointRef>
+      <CommonName>Pool Meadow Bus Station</CommonName>
+      <Indicator>Stand C</Indicator>
+      <LocalityName>Coventry</LocalityName>
+    </AnnotatedStopPointRef>
+    <AnnotatedStopPointRef>
+      <StopPointRef>43002812004</StopPointRef>
+      <CommonName>Soho Rd</CommonName>
+      <Indicator>near</Indicator>
+      <LocalityName>Handsworth</LocalityName>
+      <LocalityQualifier>Birmingham</LocalityQualifier>
+    </AnnotatedStopPointRef>
+    <AnnotatedStopPointRef>
+      <StopPointRef>43000944403</StopPointRef>
+      <CommonName>Rolfe St Station</CommonName>
+      <Indicator>near</Indicator>
+      <LocalityName>Smethwick</LocalityName>
+    </AnnotatedStopPointRef>
+    <AnnotatedStopPointRef>
+      <StopPointRef>43000700901</StopPointRef>
+      <CommonName>Coach Park</CommonName>
+      <Indicator>before</Indicator>
+      <LocalityName>Wolverhampton</LocalityName>
+    </AnnotatedStopPointRef>
+  </StopPoints>
+  <RouteSections>
+    <RouteSection id="RS1">
+      <RouteLink id="RL1">
+        <From>
+          <StopPointRef>490002205ZC</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>03700337</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL2">
+        <From>
+          <StopPointRef>03700337</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>43000005003</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL3">
+        <From>
+          <StopPointRef>43000005003</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>43002812004</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL4">
+        <From>
+          <StopPointRef>43002812004</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>43000944403</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL5">
+        <From>
+          <StopPointRef>43000944403</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>43000700901</StopPointRef>
+        </To>
+      </RouteLink>
+    </RouteSection>
+    <RouteSection id="RS2">
+      <RouteLink id="RL6">
+        <From>
+          <StopPointRef>43000700901</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>43000944403</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL7">
+        <From>
+          <StopPointRef>43000944403</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>43002812004</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL8">
+        <From>
+          <StopPointRef>43002812004</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>43000005003</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL9">
+        <From>
+          <StopPointRef>43000005003</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>03700337</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL10">
+        <From>
+          <StopPointRef>03700337</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>490002205ZC</StopPointRef>
+        </To>
+      </RouteLink>
+    </RouteSection>
+    <RouteSection id="RS3">
+      <RouteLink id="RL11">
+        <From>
+          <StopPointRef>43002812004</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>43000944403</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL12">
+        <From>
+          <StopPointRef>43000944403</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>43000700901</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL13">
+        <From>
+          <StopPointRef>43000700901</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>03700337</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL14">
+        <From>
+          <StopPointRef>03700337</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>490002205ZC</StopPointRef>
+        </To>
+      </RouteLink>
+    </RouteSection>
+  </RouteSections>
+  <Routes>
+    <Route id="R1">
+      <Description>Priory Way / Norwood Green, Southall - Coach Park, Wolverhampton</Description>
+      <RouteSectionRef>RS1</RouteSectionRef>
+    </Route>
+    <Route id="R2">
+      <Description>Coach Park, Wolverhampton - Priory Way / Norwood Green, Southall</Description>
+      <RouteSectionRef>RS2</RouteSectionRef>
+    </Route>
+    <Route id="R3">
+      <Description>Soho Rd, Handsworth - Priory Way / Norwood Green, Southall</Description>
+      <RouteSectionRef>RS3</RouteSectionRef>
+    </Route>
+  </Routes>
+  <JourneyPatternSections>
+    <JourneyPatternSection id="JPS1">
+      <JourneyPatternTimingLink id="JPTL1">
+        <From id="JPSU1" SequenceNumber="1">
+          <Activity>pickUp</Activity>
+          <StopPointRef>490002205ZC</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU2" SequenceNumber="2">
+          <Activity>pickUp</Activity>
+          <StopPointRef>03700337</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL1</RouteLinkRef>
+        <RunTime>PT0H30M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL2">
+        <From id="JPSU3" SequenceNumber="2">
+          <Activity>pickUp</Activity>
+          <StopPointRef>03700337</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU4" SequenceNumber="3">
+          <Activity>setDown</Activity>
+          <StopPointRef>43000005003</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL2</RouteLinkRef>
+        <RunTime>PT2H0M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL3">
+        <From id="JPSU5" SequenceNumber="3">
+          <Activity>setDown</Activity>
+          <StopPointRef>43000005003</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU6" SequenceNumber="4">
+          <Activity>setDown</Activity>
+          <StopPointRef>43002812004</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL3</RouteLinkRef>
+        <RunTime>PT0H35M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL4">
+        <From id="JPSU7" SequenceNumber="4">
+          <Activity>setDown</Activity>
+          <StopPointRef>43002812004</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU8" SequenceNumber="5">
+          <Activity>setDown</Activity>
+          <StopPointRef>43000944403</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL4</RouteLinkRef>
+        <RunTime>PT0H10M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL5">
+        <From id="JPSU9" SequenceNumber="5">
+          <Activity>setDown</Activity>
+          <StopPointRef>43000944403</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU10" SequenceNumber="6">
+          <Activity>setDown</Activity>
+          <StopPointRef>43000700901</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL5</RouteLinkRef>
+        <RunTime>PT0H30M0S</RunTime>
+      </JourneyPatternTimingLink>
+    </JourneyPatternSection>
+    <JourneyPatternSection id="JPS2">
+      <JourneyPatternTimingLink id="JPTL6">
+        <From id="JPSU11" SequenceNumber="1">
+          <Activity>pickUp</Activity>
+          <StopPointRef>43000700901</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU12" SequenceNumber="2">
+          <Activity>pickUp</Activity>
+          <StopPointRef>43000944403</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL6</RouteLinkRef>
+        <RunTime>PT0H30M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL7">
+        <From id="JPSU13" SequenceNumber="2">
+          <Activity>pickUp</Activity>
+          <StopPointRef>43000944403</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU14" SequenceNumber="3">
+          <Activity>pickUp</Activity>
+          <StopPointRef>43002812004</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL7</RouteLinkRef>
+        <RunTime>PT0H15M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL8">
+        <From id="JPSU15" SequenceNumber="3">
+          <Activity>pickUp</Activity>
+          <StopPointRef>43002812004</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU16" SequenceNumber="4">
+          <Activity>pickUp</Activity>
+          <StopPointRef>43000005003</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL8</RouteLinkRef>
+        <RunTime>PT0H45M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL9">
+        <From id="JPSU17" SequenceNumber="4">
+          <Activity>pickUp</Activity>
+          <StopPointRef>43000005003</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU18" SequenceNumber="5">
+          <Activity>setDown</Activity>
+          <StopPointRef>03700337</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL9</RouteLinkRef>
+        <RunTime>PT1H50M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL10">
+        <From id="JPSU19" SequenceNumber="5">
+          <Activity>setDown</Activity>
+          <StopPointRef>03700337</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU20" SequenceNumber="6">
+          <Activity>setDown</Activity>
+          <StopPointRef>490002205ZC</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL10</RouteLinkRef>
+        <RunTime>PT0H25M0S</RunTime>
+      </JourneyPatternTimingLink>
+    </JourneyPatternSection>
+    <JourneyPatternSection id="JPS3">
+      <JourneyPatternTimingLink id="JPTL11">
+        <From id="JPSU21" SequenceNumber="1">
+          <Activity>pickUp</Activity>
+          <StopPointRef>43002812004</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU22" SequenceNumber="2">
+          <Activity>pickUp</Activity>
+          <StopPointRef>43000944403</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL4</RouteLinkRef>
+        <RunTime>PT0H15M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL12">
+        <From id="JPSU23" SequenceNumber="2">
+          <Activity>pickUp</Activity>
+          <StopPointRef>43000944403</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU24" SequenceNumber="3">
+          <Activity>pickUp</Activity>
+          <StopPointRef>43000700901</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL5</RouteLinkRef>
+        <RunTime>PT1H0M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL13">
+        <From id="JPSU25" SequenceNumber="3">
+          <Activity>pickUp</Activity>
+          <StopPointRef>43000700901</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU26" SequenceNumber="4">
+          <Activity>setDown</Activity>
+          <StopPointRef>03700337</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL13</RouteLinkRef>
+        <RunTime>PT2H30M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL14">
+        <From id="JPSU27" SequenceNumber="4">
+          <Activity>setDown</Activity>
+          <StopPointRef>03700337</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU28" SequenceNumber="5">
+          <Activity>setDown</Activity>
+          <StopPointRef>490002205ZC</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL10</RouteLinkRef>
+        <RunTime>PT0H15M0S</RunTime>
+      </JourneyPatternTimingLink>
+    </JourneyPatternSection>
+  </JourneyPatternSections>
+  <Operators>
+    <Operator id="BHAT" Modification="new" RevisionNumber="0">
+      <NationalOperatorCode>BHAT</NationalOperatorCode>
+      <OperatorShortName>New Bharat Coaches (Southall, London)</OperatorShortName>
+      <TradingName>New Bharat Coaches</TradingName>
+      <LicenceNumber>PD0001350</LicenceNumber>
+      <PrimaryMode>coach</PrimaryMode>
+      <Note>You must book this service in advance via the operator's website or telephone</Note>
+    </Operator>
+  </Operators>
+  <Services>
+    <Service RevisionNumber="0">
+      <ServiceCode>UZ000BHAT:NB2</ServiceCode>
+      <PrivateCode>london_wolverhampton</PrivateCode>
+      <Lines>
+        <Line id="BHAT:UZ000BHAT:NB2:NB2">
+          <LineName>NB2</LineName>
+          <OutboundDescription>
+            <Origin>Priory Way / Norwood Green, Southall</Origin>
+            <Destination>Coach Park, Wolverhampton</Destination>
+            <Description>London Southall - Wolverhampton</Description>
+          </OutboundDescription>
+          <InboundDescription>
+            <Origin>Coach Park, Wolverhampton</Origin>
+            <Destination>Priory Way / Norwood Green, Southall</Destination>
+            <Description>Wolverhampton - London Southall</Description>
+          </InboundDescription>
+        </Line>
+      </Lines>
+      <OperatingPeriod>
+        <StartDate>2026-04-17</StartDate>
+        <EndDate>2027-04-17</EndDate>
+      </OperatingPeriod>
+      <RegisteredOperatorRef>BHAT</RegisteredOperatorRef>
+      <Mode>coach</Mode>
+      <PublicUse>true</PublicUse>
+      <StandardService>
+        <Origin>Priory Way / Norwood Green, Southall</Origin>
+        <Destination>Coach Park, Wolverhampton</Destination>
+        <JourneyPattern id="JP1">
+          <DestinationDisplay>Coach Park, Wolverhampton</DestinationDisplay>
+          <OperatorRef>BHAT</OperatorRef>
+          <Direction>outbound</Direction>
+          <Description>Priory Way / Norwood Green, Southall - Coach Park, Wolverhampton</Description>
+          <RouteRef>R1</RouteRef>
+          <JourneyPatternSectionRefs>JPS1</JourneyPatternSectionRefs>
+        </JourneyPattern>
+        <JourneyPattern id="JP2">
+          <DestinationDisplay>Priory Way / Norwood Green, Southall</DestinationDisplay>
+          <OperatorRef>BHAT</OperatorRef>
+          <Direction>inbound</Direction>
+          <Description>Coach Park, Wolverhampton - Priory Way / Norwood Green, Southall</Description>
+          <RouteRef>R2</RouteRef>
+          <JourneyPatternSectionRefs>JPS2</JourneyPatternSectionRefs>
+        </JourneyPattern>
+        <JourneyPattern id="JP3">
+          <DestinationDisplay>Priory Way / Norwood Green, Southall</DestinationDisplay>
+          <OperatorRef>BHAT</OperatorRef>
+          <Direction>inbound</Direction>
+          <Description>Soho Rd, Handsworth - Priory Way / Norwood Green, Southall</Description>
+          <RouteRef>R3</RouteRef>
+          <JourneyPatternSectionRefs>JPS3</JourneyPatternSectionRefs>
+        </JourneyPattern>
+      </StandardService>
+    </Service>
+  </Services>
+  <VehicleJourneys>
+    <VehicleJourney>
+      <PrivateCode>NB2-VJ1</PrivateCode>
+      <OperatorRef>BHAT</OperatorRef>
+      <Operational>
+        <TicketMachine>
+          <JourneyCode>1</JourneyCode>
+        </TicketMachine>
+      </Operational>
+      <OperatingProfile>
+        <RegularDayType>
+          <DaysOfWeek>
+            <Monday />
+            <Tuesday />
+            <Wednesday />
+            <Thursday />
+            <Friday />
+            <Saturday />
+            <Sunday />
+          </DaysOfWeek>
+        </RegularDayType>
+      </OperatingProfile>
+      <CommercialBasis>notContracted</CommercialBasis>
+      <VehicleJourneyCode>VJ1</VehicleJourneyCode>
+      <ServiceRef>UZ000BHAT:NB2</ServiceRef>
+      <LineRef>BHAT:UZ000BHAT:NB2:NB2</LineRef>
+      <JourneyPatternRef>JP1</JourneyPatternRef>
+      <DepartureTime>09:45:00</DepartureTime>
+    </VehicleJourney>
+    <VehicleJourney>
+      <PrivateCode>NB2-VJ2</PrivateCode>
+      <OperatorRef>BHAT</OperatorRef>
+      <Operational>
+        <TicketMachine>
+          <JourneyCode>2</JourneyCode>
+        </TicketMachine>
+      </Operational>
+      <OperatingProfile>
+        <RegularDayType>
+          <DaysOfWeek>
+            <Monday />
+            <Tuesday />
+            <Wednesday />
+            <Thursday />
+            <Friday />
+            <Saturday />
+            <Sunday />
+          </DaysOfWeek>
+        </RegularDayType>
+      </OperatingProfile>
+      <CommercialBasis>notContracted</CommercialBasis>
+      <VehicleJourneyCode>VJ2</VehicleJourneyCode>
+      <ServiceRef>UZ000BHAT:NB2</ServiceRef>
+      <LineRef>BHAT:UZ000BHAT:NB2:NB2</LineRef>
+      <JourneyPatternRef>JP1</JourneyPatternRef>
+      <DepartureTime>14:45:00</DepartureTime>
+    </VehicleJourney>
+    <VehicleJourney>
+      <PrivateCode>NB2-VJ3</PrivateCode>
+      <OperatorRef>BHAT</OperatorRef>
+      <Operational>
+        <TicketMachine>
+          <JourneyCode>3</JourneyCode>
+        </TicketMachine>
+      </Operational>
+      <OperatingProfile>
+        <RegularDayType>
+          <DaysOfWeek>
+            <Monday />
+            <Tuesday />
+            <Wednesday />
+            <Thursday />
+            <Friday />
+            <Saturday />
+            <Sunday />
+          </DaysOfWeek>
+        </RegularDayType>
+      </OperatingProfile>
+      <CommercialBasis>notContracted</CommercialBasis>
+      <VehicleJourneyCode>VJ3</VehicleJourneyCode>
+      <ServiceRef>UZ000BHAT:NB2</ServiceRef>
+      <LineRef>BHAT:UZ000BHAT:NB2:NB2</LineRef>
+      <JourneyPatternRef>JP2</JourneyPatternRef>
+      <DepartureTime>14:30:00</DepartureTime>
+    </VehicleJourney>
+    <VehicleJourney>
+      <PrivateCode>NB2-VJ4</PrivateCode>
+      <OperatorRef>BHAT</OperatorRef>
+      <Operational>
+        <TicketMachine>
+          <JourneyCode>4</JourneyCode>
+        </TicketMachine>
+      </Operational>
+      <OperatingProfile>
+        <RegularDayType>
+          <DaysOfWeek>
+            <Monday />
+            <Tuesday />
+            <Wednesday />
+            <Thursday />
+            <Friday />
+            <Saturday />
+            <Sunday />
+          </DaysOfWeek>
+        </RegularDayType>
+      </OperatingProfile>
+      <CommercialBasis>notContracted</CommercialBasis>
+      <VehicleJourneyCode>VJ4</VehicleJourneyCode>
+      <ServiceRef>UZ000BHAT:NB2</ServiceRef>
+      <LineRef>BHAT:UZ000BHAT:NB2:NB2</LineRef>
+      <JourneyPatternRef>JP3</JourneyPatternRef>
+      <DepartureTime>18:00:00</DepartureTime>
+    </VehicleJourney>
+  </VehicleJourneys>
+</TransXChange>

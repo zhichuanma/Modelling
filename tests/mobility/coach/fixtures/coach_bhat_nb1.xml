@@ -1,0 +1,250 @@
+<?xml version='1.0' encoding='utf-8'?>
+<TransXChange xmlns="http://www.transxchange.org.uk/"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" CreationDateTime="2026-04-17T12:05:04"
+  ModificationDateTime="2026-04-17T12:15:04" Modification="revise" RevisionNumber="1"
+  FileName="BHAT-New_Bharat_Coaches_Southall_London-NB1-Priory_Way_Southall_Norwood_Green-St_Margaret_s_Bus_Station_Leicester.xml"
+  SchemaVersion="2.4" RegistrationDocument="false"
+  xsi:schemaLocation="http://www.transxchange.org.uk/ http://www.transxchange.org.uk/schema/2.4/TransXChange_general.xsd">
+  <StopPoints>
+    <AnnotatedStopPointRef>
+      <StopPointRef>490002205ZC</StopPointRef>
+      <CommonName>Priory Way / Southall</CommonName>
+      <Indicator>-&gt;SE</Indicator>
+      <LocalityName>Norwood Green</LocalityName>
+      <LocalityQualifier>Southall</LocalityQualifier>
+    </AnnotatedStopPointRef>
+    <AnnotatedStopPointRef>
+      <StopPointRef>03700337</StopPointRef>
+      <CommonName>Wellington Street stop W</CommonName>
+      <Indicator>Stop W</Indicator>
+      <LocalityName>Slough Town Centre</LocalityName>
+      <LocalityQualifier>Slough</LocalityQualifier>
+    </AnnotatedStopPointRef>
+    <AnnotatedStopPointRef>
+      <StopPointRef>269030094</StopPointRef>
+      <CommonName>St Margaret's Bus Station</CommonName>
+      <Indicator>Stand SY</Indicator>
+      <LocalityName>Leicester</LocalityName>
+    </AnnotatedStopPointRef>
+  </StopPoints>
+  <RouteSections>
+    <RouteSection id="RS1">
+      <RouteLink id="RL1">
+        <From>
+          <StopPointRef>490002205ZC</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>03700337</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL2">
+        <From>
+          <StopPointRef>03700337</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>269030094</StopPointRef>
+        </To>
+      </RouteLink>
+    </RouteSection>
+    <RouteSection id="RS2">
+      <RouteLink id="RL3">
+        <From>
+          <StopPointRef>269030094</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>03700337</StopPointRef>
+        </To>
+      </RouteLink>
+      <RouteLink id="RL4">
+        <From>
+          <StopPointRef>03700337</StopPointRef>
+        </From>
+        <To>
+          <StopPointRef>490002205ZC</StopPointRef>
+        </To>
+      </RouteLink>
+    </RouteSection>
+  </RouteSections>
+  <Routes>
+    <Route id="R1">
+      <Description>Priory Way / Norwood Green, Southall - St Margaret's Bus Station, Leicester</Description>
+      <RouteSectionRef>RS1</RouteSectionRef>
+    </Route>
+    <Route id="R2">
+      <Description>St Margaret's Bus Station, Leicester - Priory Way / Norwood Green, Southall</Description>
+      <RouteSectionRef>RS2</RouteSectionRef>
+    </Route>
+  </Routes>
+  <JourneyPatternSections>
+    <JourneyPatternSection id="JPS1">
+      <JourneyPatternTimingLink id="JPTL1">
+        <From id="JPSU1" SequenceNumber="1">
+          <Activity>pickUp</Activity>
+          <StopPointRef>490002205ZC</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU2" SequenceNumber="2">
+          <Activity>pickUp</Activity>
+          <StopPointRef>03700337</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL1</RouteLinkRef>
+        <RunTime>PT0H30M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL2">
+        <From id="JPSU3" SequenceNumber="2">
+          <Activity>pickUp</Activity>
+          <StopPointRef>03700337</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU4" SequenceNumber="3">
+          <Activity>setDown</Activity>
+          <StopPointRef>269030094</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL2</RouteLinkRef>
+        <RunTime>PT2H30M0S</RunTime>
+      </JourneyPatternTimingLink>
+    </JourneyPatternSection>
+    <JourneyPatternSection id="JPS2">
+      <JourneyPatternTimingLink id="JPTL3">
+        <From id="JPSU5" SequenceNumber="1">
+          <Activity>pickUp</Activity>
+          <StopPointRef>269030094</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU6" SequenceNumber="2">
+          <Activity>setDown</Activity>
+          <StopPointRef>03700337</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL3</RouteLinkRef>
+        <RunTime>PT2H15M0S</RunTime>
+      </JourneyPatternTimingLink>
+      <JourneyPatternTimingLink id="JPTL4">
+        <From id="JPSU7" SequenceNumber="2">
+          <Activity>setDown</Activity>
+          <StopPointRef>03700337</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </From>
+        <To id="JPSU8" SequenceNumber="3">
+          <Activity>setDown</Activity>
+          <StopPointRef>490002205ZC</StopPointRef>
+          <TimingStatus>principalTimingPoint</TimingStatus>
+        </To>
+        <RouteLinkRef>RL4</RouteLinkRef>
+        <RunTime>PT0H15M0S</RunTime>
+      </JourneyPatternTimingLink>
+    </JourneyPatternSection>
+  </JourneyPatternSections>
+  <Operators>
+    <Operator id="BHAT" Modification="new" RevisionNumber="0">
+      <NationalOperatorCode>BHAT</NationalOperatorCode>
+      <OperatorShortName>New Bharat Coaches (Southall, London)</OperatorShortName>
+      <TradingName>New Bharat Coaches</TradingName>
+      <LicenceNumber>PD0001350</LicenceNumber>
+      <PrimaryMode>coach</PrimaryMode>
+      <Note>You must book this service in advance via the operator's website or telephone</Note>
+    </Operator>
+  </Operators>
+  <Services>
+    <Service RevisionNumber="0">
+      <ServiceCode>UZ000BHAT:NB1</ServiceCode>
+      <PrivateCode>london_leicester</PrivateCode>
+      <Lines>
+        <Line id="BHAT:UZ000BHAT:NB1:NB1">
+          <LineName>NB1</LineName>
+          <OutboundDescription>
+            <Origin>Priory Way / Norwood Green, Southall</Origin>
+            <Destination>St Margaret's Bus Station, Leicester</Destination>
+            <Description>London Southall - Leicester</Description>
+          </OutboundDescription>
+          <InboundDescription>
+            <Origin>St Margaret's Bus Station, Leicester</Origin>
+            <Destination>Priory Way / Norwood Green, Southall</Destination>
+            <Description>Leicester - London Southall</Description>
+          </InboundDescription>
+        </Line>
+      </Lines>
+      <OperatingPeriod>
+        <StartDate>2026-04-17</StartDate>
+        <EndDate>2027-04-17</EndDate>
+      </OperatingPeriod>
+      <RegisteredOperatorRef>BHAT</RegisteredOperatorRef>
+      <Mode>coach</Mode>
+      <PublicUse>true</PublicUse>
+      <StandardService>
+        <Origin>Priory Way / Norwood Green, Southall</Origin>
+        <Destination>St Margaret's Bus Station, Leicester</Destination>
+        <JourneyPattern id="JP1">
+          <DestinationDisplay>St Margaret's Bus Station, Leicester</DestinationDisplay>
+          <OperatorRef>BHAT</OperatorRef>
+          <Direction>outbound</Direction>
+          <Description>Priory Way / Norwood Green, Southall - St Margaret's Bus Station, Leicester</Description>
+          <RouteRef>R1</RouteRef>
+          <JourneyPatternSectionRefs>JPS1</JourneyPatternSectionRefs>
+        </JourneyPattern>
+        <JourneyPattern id="JP2">
+          <DestinationDisplay>Priory Way / Norwood Green, Southall</DestinationDisplay>
+          <OperatorRef>BHAT</OperatorRef>
+          <Direction>inbound</Direction>
+          <Description>St Margaret's Bus Station, Leicester - Priory Way / Norwood Green, Southall</Description>
+          <RouteRef>R2</RouteRef>
+          <JourneyPatternSectionRefs>JPS2</JourneyPatternSectionRefs>
+        </JourneyPattern>
+      </StandardService>
+    </Service>
+  </Services>
+  <VehicleJourneys>
+    <VehicleJourney>
+      <PrivateCode>NB1-VJ1</PrivateCode>
+      <OperatorRef>BHAT</OperatorRef>
+      <Operational>
+        <TicketMachine>
+          <JourneyCode>1</JourneyCode>
+        </TicketMachine>
+      </Operational>
+      <OperatingProfile>
+        <RegularDayType>
+          <DaysOfWeek>
+            <Monday />
+            <Friday />
+            <Saturday />
+            <Sunday />
+          </DaysOfWeek>
+        </RegularDayType>
+      </OperatingProfile>
+      <CommercialBasis>notContracted</CommercialBasis>
+      <VehicleJourneyCode>VJ1</VehicleJourneyCode>
+      <ServiceRef>UZ000BHAT:NB1</ServiceRef>
+      <LineRef>BHAT:UZ000BHAT:NB1:NB1</LineRef>
+      <JourneyPatternRef>JP1</JourneyPatternRef>
+      <DepartureTime>08:15:00</DepartureTime>
+    </VehicleJourney>
+    <VehicleJourney>
+      <PrivateCode>NB1-VJ2</PrivateCode>
+      <OperatorRef>BHAT</OperatorRef>
+      <Operational>
+        <TicketMachine>
+          <JourneyCode>2</JourneyCode>
+        </TicketMachine>
+      </Operational>
+      <OperatingProfile>
+        <RegularDayType>
+          <DaysOfWeek>
+            <Monday />
+            <Friday />
+            <Saturday />
+            <Sunday />
+          </DaysOfWeek>
+        </RegularDayType>
+      </OperatingProfile>
+      <CommercialBasis>notContracted</CommercialBasis>
+      <VehicleJourneyCode>VJ2</VehicleJourneyCode>
+      <ServiceRef>UZ000BHAT:NB1</ServiceRef>
+      <LineRef>BHAT:UZ000BHAT:NB1:NB1</LineRef>
+      <JourneyPatternRef>JP2</JourneyPatternRef>
+      <DepartureTime>17:00:00</DepartureTime>
+    </VehicleJourney>
+  </VehicleJourneys>
+</TransXChange>
