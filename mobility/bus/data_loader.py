@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from mobility.core.spatial import DEFAULT_ONSPD_PATH, load_lsoa_centroids, nearest_lsoa_for_points
+
 
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "outputs" / "all_blocks.parquet"
 
@@ -104,6 +106,48 @@ def summarize_block_quality(df: pd.DataFrame) -> pd.DataFrame:
         "layover_h_p95": float(layover_h.quantile(0.95)) if len(layover_h) else np.nan,
     }
     return pd.DataFrame([record])
+
+
+def attach_lsoa(
+    blocks: pd.DataFrame,
+    *,
+    onspd_path: Path | None = None,
+    centroids: pd.DataFrame | None = None,
+    max_distance_km: float | None = 5.0,
+) -> pd.DataFrame:
+    """Spatially join bus trip endpoints to nearest LSOA-21 centroid codes."""
+    required_columns = ("start_lat", "start_lon", "end_lat", "end_lon")
+    missing = [col for col in required_columns if col not in blocks.columns]
+    if missing:
+        raise ValueError(f"blocks is missing required coordinate columns: {missing}")
+
+    source_path = DEFAULT_ONSPD_PATH if onspd_path is None else Path(onspd_path)
+    centroid_frame = load_lsoa_centroids(source_path) if centroids is None else centroids.copy()
+
+    out = blocks.copy()
+    start_lsoa, start_distance_km = nearest_lsoa_for_points(
+        out["start_lat"].to_numpy(dtype=float),
+        out["start_lon"].to_numpy(dtype=float),
+        centroid_frame,
+        max_distance_km=max_distance_km,
+    )
+    end_lsoa, end_distance_km = nearest_lsoa_for_points(
+        out["end_lat"].to_numpy(dtype=float),
+        out["end_lon"].to_numpy(dtype=float),
+        centroid_frame,
+        max_distance_km=max_distance_km,
+    )
+
+    out["start_lsoa"] = start_lsoa
+    out["end_lsoa"] = end_lsoa
+    out["start_lsoa_distance_km"] = start_distance_km
+    out["end_lsoa_distance_km"] = end_distance_km
+    out.attrs["lsoa_join"] = {
+        "onspd_path": str(source_path) if centroids is None else str(onspd_path or ""),
+        "max_distance_km": None if max_distance_km is None else float(max_distance_km),
+        "n_unmatched": int(((out["start_lsoa"] == "") | (out["end_lsoa"] == "")).sum()),
+    }
+    return out
 
 
 def filter_to_clean_blocks(

@@ -50,7 +50,7 @@ cells.append(
         from mobility.core import DailySchedule, ParkingEvent, simulate_single_day
         from mobility.core.constants import CV_THRESHOLD, DEFAULT_CHEMISTRY
         from mobility.core.simulator import STEP_HOURS, STEPS_PER_DAY
-        from mobility.bus.data_loader import load_all_blocks, summarize_block_quality
+        from mobility.bus.data_loader import attach_lsoa, load_all_blocks, summarize_block_quality
         from mobility.bus.selection import (
             render_block_identity_card,
             sample_contrast_block,
@@ -140,9 +140,26 @@ cells.append(md("## A. What `all_blocks.parquet` is"))
 cells.append(
     code(
         """
-        all_blocks = load_all_blocks(BLOCKS_PATH)
+        all_blocks = attach_lsoa(load_all_blocks(BLOCKS_PATH))
         quality = summarize_block_quality(all_blocks)
         display(quality.T.rename(columns={0: "value"}))
+
+        lsoa_join = all_blocks.attrs["lsoa_join"]
+        matched_start = all_blocks["start_lsoa"].ne("")
+        matched_end = all_blocks["end_lsoa"].ne("")
+        lsoa_qc = pd.DataFrame(
+            [
+                ("max_distance_km", lsoa_join["max_distance_km"]),
+                ("n_unmatched_rows", lsoa_join["n_unmatched"]),
+                ("pct_rows_unmatched", 100.0 * lsoa_join["n_unmatched"] / max(len(all_blocks), 1)),
+                ("start_distance_km_median", all_blocks.loc[matched_start, "start_lsoa_distance_km"].median()),
+                ("start_distance_km_p99", all_blocks.loc[matched_start, "start_lsoa_distance_km"].quantile(0.99)),
+                ("end_distance_km_median", all_blocks.loc[matched_end, "end_lsoa_distance_km"].median()),
+                ("end_distance_km_p99", all_blocks.loc[matched_end, "end_lsoa_distance_km"].quantile(0.99)),
+            ],
+            columns=["metric", "value"],
+        )
+        display(lsoa_qc)
 
         block_stats = all_blocks.groupby("block_id").agg(
             n_trips=("trip_id", "count"),
@@ -169,6 +186,16 @@ cells.append(
     )
 )
 
+cells.append(
+    md(
+        """
+        ## A.1. Trip endpoint LSOAs
+
+        The block table now carries nearest LSOA-21 labels on trip start and end points. The join is event-level: trips get origin and destination LSOAs, layovers inherit the previous trip's destination LSOA, and first/last depot dwell uses the surrounding trip endpoint.
+        """
+    )
+)
+
 cells.append(md("## A.5. Honest labels for the data"))
 
 cells.append(
@@ -180,7 +207,10 @@ cells.append(
                 ("Cross-midnight blocks", f"{q['pct_cross_midnight_blocks']:.1f}% of blocks have end_h >= 24", "Handled by splitting into day 0 and day 1 schedules."),
                 ("Native vs inferred continuity", f"native {q['stop_continuity_native']:.1f}% / inferred {q['stop_continuity_inferred']:.1f}%", "Selection defaults to native; inferred quality is still reported."),
                 ("Distance provenance", f"shape {q['pct_shape_distance']:.1f}% / stop_haversine {q['pct_stop_haversine_distance']:.1f}%", "Stop-haversine distance is a transparent fallback and likely underestimates by 15-25%."),
+                ("Endpoint LSOAs", "nearest LSOA-21 centroid join, 5 km threshold", "Scotland / NI / offshore stops can stay empty; distance_km columns expose the QC."),
                 ("Depot abstraction", "depot_terminus", "It marks first/last terminus dwell, not a real depot model."),
+                ("Layover LSOA convention", "previous trip end_lsoa", "The location marks where the bus is parked, not where it heads next."),
+                ("Vehicle subtype filter", "include={bus, minibus, unknown}", "Coach GenModels and obvious misclassifications are filtered at load time using Data/EV/manual/genmodel_subtype_lookup.csv."),
                 ("Calendar missing", "service_id only", "The label is a representative service day, never a real date."),
             ],
             columns=["issue", "observed label", "notebook treatment"],
@@ -218,6 +248,9 @@ cells.append(
                 ("stock coverage", f"{vehicle_params.attrs['stock_coverage_pct']:.1f}%"),
                 ("sampled make", protagonist_vehicle["make"]),
                 ("sampled model", protagonist_vehicle["gen_model"]),
+                ("subtype filter", ", ".join(vehicle_params.attrs.get("include_subtypes", ()))),
+                ("dropped by subtype", str(vehicle_params.attrs.get("dropped_by_subtype", {}))),
+                ("sampled subtype", str(protagonist_vehicle.get("subtype", ""))),
                 ("battery_kwh", BUS_BATTERY_KWH),
                 ("consumption_kwh_per_km", BUS_CONSUMPTION_KWH_PER_KM),
                 ("depot_charge_kw", DEPOT_CHARGE_KW),
@@ -256,6 +289,8 @@ cells.append(
                         "arrival_h": trip.arrival_time,
                         "distance_km": trip.distance_km,
                         "energy_kwh": trip.energy_consumed_kwh,
+                        "origin_lsoa": trip.origin_lsoa,
+                        "destination_lsoa": trip.destination_lsoa,
                     }
                 )
             for event in schedule.parking_events:
@@ -266,6 +301,7 @@ cells.append(
                         "start_h": event.start_time,
                         "end_h": event.end_time,
                         "duration_h": event.duration_hours,
+                        "location_lsoa": event.location_lsoa,
                         "can_charge": event.can_charge,
                         "charge_power_kw": event.charge_power_kw,
                     }
@@ -446,6 +482,8 @@ cells.append(
                     "vehicle_make": protagonist_vehicle["make"],
                     "vehicle_gen_model": protagonist_vehicle["gen_model"],
                     "vehicle_stock_2025_q2": float(protagonist_vehicle["stock_2025_q2"]),
+                    "first_origin_lsoa": str(trips_table["origin_lsoa"].iloc[0]) if not trips_table.empty else "",
+                    "last_destination_lsoa": str(trips_table["destination_lsoa"].iloc[-1]) if not trips_table.empty else "",
                     "depot_dwell_h": round(float(dwell_by_purpose.get("depot_terminus", 0.0)), 2),
                     "layover_dwell_h": round(float(dwell_by_purpose.get("layover", 0.0)), 2),
                     "total_consumed_kwh": round(baseline["total_consumed_kwh"], 2),

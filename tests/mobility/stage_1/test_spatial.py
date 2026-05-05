@@ -36,10 +36,12 @@ def known_centroids() -> pd.DataFrame:
 
 def test_load_lsoa_centroids_returns_expected_schema(real_centroids: pd.DataFrame) -> None:
     assert len(real_centroids) >= 40000
-    assert list(real_centroids.columns) == ["lsoa_code", "easting_m", "northing_m"]
+    assert list(real_centroids.columns) == ["lsoa_code", "easting_m", "northing_m", "lat", "lon"]
     assert real_centroids["lsoa_code"].dtype == object
     assert real_centroids["easting_m"].dtype == np.dtype("float64")
     assert real_centroids["northing_m"].dtype == np.dtype("float64")
+    assert real_centroids["lat"].dtype == np.dtype("float64")
+    assert real_centroids["lon"].dtype == np.dtype("float64")
     assert real_centroids["lsoa_code"].is_unique
 
 

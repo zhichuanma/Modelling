@@ -15,6 +15,14 @@ DEFAULT_VEHICLE_PARAMS_PATH = (
     / "EV_prepared"
     / "BEV_Bus_Coach_unique_with_params_with_AC.csv"
 )
+DEFAULT_SUBTYPE_LOOKUP_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "Data"
+    / "EV"
+    / "manual"
+    / "genmodel_subtype_lookup.csv"
+)
+DEFAULT_INCLUDE_SUBTYPES: tuple[str, ...] = ("bus", "minibus", "unknown")
 DEFAULT_FALLBACK_DEPOT_CHARGE_KW = 100.0
 
 
@@ -25,12 +33,35 @@ def _numeric_column(df: pd.DataFrame, candidates: tuple[str, ...]) -> pd.Series:
     return pd.Series(np.nan, index=df.index, dtype=float)
 
 
+def _load_subtype_lookup(path: Path) -> dict[str, str]:
+    """Read the GenModel->subtype lookup as a normalised dict.
+
+    Keys and values are stripped + uppercased on the key side, lowercased on
+    the value side, so callers can rely on case-insensitive matches.
+    """
+    raw = pd.read_csv(path)
+    if not {"GenModel", "subtype"}.issubset(raw.columns):
+        raise ValueError(
+            f"subtype lookup at {path} must have GenModel and subtype columns; got {list(raw.columns)}"
+        )
+    keys = raw["GenModel"].astype(str).str.strip().str.upper()
+    values = raw["subtype"].astype(str).str.strip().str.lower()
+    return dict(zip(keys, values))
+
+
 def load_bus_vehicle_params(
     path: Path = DEFAULT_VEHICLE_PARAMS_PATH,
     *,
     fallback_depot_charge_kw: float = DEFAULT_FALLBACK_DEPOT_CHARGE_KW,
+    subtype_lookup_path: Path | None = DEFAULT_SUBTYPE_LOOKUP_PATH,
+    include_subtypes: tuple[str, ...] = DEFAULT_INCLUDE_SUBTYPES,
 ) -> pd.DataFrame:
-    """Load the prepared bus/coach model table as a weighted sampling frame."""
+    """Load the prepared bus/coach model table as a weighted sampling frame.
+
+    Pass ``subtype_lookup_path=None`` to skip subtype filtering for backwards-
+    compatible tests. ``include_subtypes`` controls which lookup subtypes are
+    retained, using case-insensitive values normalised to lowercase.
+    """
     raw = pd.read_csv(path)
     stock = _numeric_column(raw, ("2025 Q2",)).fillna(0.0)
     battery_kwh = _numeric_column(raw, ("energy_capacity_kWh", "battery_capacity_kWh"))
@@ -57,15 +88,33 @@ def load_bus_vehicle_params(
             "source_url": raw.get("source_url", pd.Series("", index=raw.index)).fillna("").astype(str),
         }
     )
+    if subtype_lookup_path is not None:
+        lookup = _load_subtype_lookup(subtype_lookup_path)
+        lookup_keys = params["gen_model"].astype(str).str.strip().str.upper()
+        params["subtype"] = lookup_keys.map(lookup).fillna("unknown")
+    else:
+        params["subtype"] = "unknown"
+
+    allowed = tuple(subtype.strip().lower() for subtype in include_subtypes)
     valid = (
         params["stock_2025_q2"].gt(0.0)
         & params["battery_kwh"].gt(0.0)
         & params["consumption_kwh_per_km"].gt(0.0)
         & params["depot_charge_kw"].gt(0.0)
+        & params["subtype"].isin(allowed)
     )
     sampling_frame = params.loc[valid].reset_index(drop=True)
+    sampling_frame.attrs["subtype_lookup_path"] = str(subtype_lookup_path) if subtype_lookup_path is not None else None
+    sampling_frame.attrs["include_subtypes"] = tuple(allowed)
+    dropped = params.loc[~params["subtype"].isin(allowed), "subtype"].value_counts()
+    dropped_by_subtype = {str(subtype): int(count) for subtype, count in dropped.items()}
+    sampling_frame.attrs["dropped_by_subtype"] = dropped_by_subtype
     if sampling_frame.empty:
-        raise ValueError("No bus vehicle rows have positive stock, battery, consumption, and charge power.")
+        raise ValueError(
+            f"No bus vehicle rows survive subtype filter "
+            f"(lookup={subtype_lookup_path}, include={allowed}); "
+            f"dropped counts: {dropped_by_subtype}"
+        )
 
     total_stock = float(params["stock_2025_q2"].sum())
     valid_stock = float(sampling_frame["stock_2025_q2"].sum())

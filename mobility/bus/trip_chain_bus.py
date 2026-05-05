@@ -17,6 +17,10 @@ def _as_float(value: Any) -> float:
     return float(value) if pd.notna(value) else float("nan")
 
 
+def _as_str_or_empty(value: Any) -> str:
+    return str(value) if pd.notna(value) else ""
+
+
 def _block_metadata(block_df: pd.DataFrame) -> dict[str, Any]:
     ordered = block_df.sort_values("start_h")
     first = ordered.iloc[0]
@@ -79,6 +83,8 @@ def _build_trip(
         origin_purpose="bus_stop",
         destination_purpose="bus_stop",
         energy_consumed_kwh=distance_km * float(consumption_kwh_per_km),
+        origin_lsoa=_as_str_or_empty(row.get("start_lsoa", "")),
+        destination_lsoa=_as_str_or_empty(row.get("end_lsoa", "")),
     )
     for col in (
         "agency_id",
@@ -100,12 +106,19 @@ def _build_trip(
     return trip
 
 
-def _depot_event(start_h: float, end_h: float, depot_charge_kw: float) -> ParkingEvent:
+def _depot_event(
+    start_h: float,
+    end_h: float,
+    depot_charge_kw: float,
+    *,
+    location_lsoa: str = "",
+) -> ParkingEvent:
     return ParkingEvent(
         start_time=float(start_h),
         end_time=float(end_h),
         duration_hours=float(end_h - start_h),
         location_purpose="depot_terminus",
+        location_lsoa=location_lsoa,
         can_charge=True,
         charge_power_kw=float(depot_charge_kw),
     )
@@ -118,6 +131,7 @@ def _layover_event(
     allow_layover_charging: bool,
     layover_charge_kw: float,
     min_layover_for_charging_h: float,
+    location_lsoa: str = "",
 ) -> ParkingEvent:
     duration_h = float(end_h - start_h)
     can_charge = bool(allow_layover_charging and duration_h >= min_layover_for_charging_h)
@@ -126,6 +140,7 @@ def _layover_event(
         end_time=float(end_h),
         duration_hours=duration_h,
         location_purpose="layover",
+        location_lsoa=location_lsoa,
         can_charge=can_charge,
         charge_power_kw=float(layover_charge_kw) if can_charge else 0.0,
     )
@@ -142,10 +157,18 @@ def _attach_parking(
     trips = sorted(schedule.trips, key=lambda trip: trip.departure_time)
     schedule.trips = trips
     if not trips:
+        # No trip endpoints exist, so the all-day depot placeholder has no LSOA.
         schedule.parking_events.append(_depot_event(0.0, HOURS_PER_DAY, depot_charge_kw))
         return
 
-    schedule.parking_events.append(_depot_event(0.0, trips[0].departure_time, depot_charge_kw))
+    schedule.parking_events.append(
+        _depot_event(
+            0.0,
+            trips[0].departure_time,
+            depot_charge_kw,
+            location_lsoa=trips[0].origin_lsoa,
+        )
+    )
     for left, right in zip(trips[:-1], trips[1:]):
         if right.departure_time <= left.arrival_time:
             continue
@@ -156,9 +179,17 @@ def _attach_parking(
                 allow_layover_charging=allow_layover_charging,
                 layover_charge_kw=layover_charge_kw,
                 min_layover_for_charging_h=min_layover_for_charging_h,
+                location_lsoa=left.destination_lsoa,
             )
         )
-    schedule.parking_events.append(_depot_event(trips[-1].arrival_time, HOURS_PER_DAY, depot_charge_kw))
+    schedule.parking_events.append(
+        _depot_event(
+            trips[-1].arrival_time,
+            HOURS_PER_DAY,
+            depot_charge_kw,
+            location_lsoa=trips[-1].destination_lsoa,
+        )
+    )
 
 
 def block_to_daily_schedules(
