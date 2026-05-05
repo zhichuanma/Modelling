@@ -35,3 +35,21 @@ def test_simulate_block_year_threads_soc_and_inactive_charging() -> None:
     assert result["annual_energy_kwh"] == pytest.approx(200.0)
     assert result["soc_min"] < result["soc_end"]
     assert result["depot_kwh"] > 0.0
+
+
+def test_simulate_block_year_can_drop_large_time_series_from_result() -> None:
+    result = simulate_block_year(
+        _block(),
+        [dt.date(2026, 4, 17)],
+        {"battery_kwh": 120.0, "consumption_kwh_per_km": 1.0, "depot_charge_kw": 60.0},
+        "2026-04-17",
+        "2026-04-17",
+        keep_soc=False,
+        keep_load_matrix=False,
+    )
+
+    assert "soc" not in result
+    assert "load_kw" not in result
+    assert "load_matrix_kw" not in result
+    assert result["annual_distance_km"] == pytest.approx(100.0)
+    assert result["soc_min"] < result["soc_end"]

@@ -7,11 +7,34 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ._compat import field as _field
 from .feasibility import journey_feasibility
 
 
-def _known_non_cross_midnight(df: pd.DataFrame) -> pd.DataFrame:
+def _runtime_h(data: pd.DataFrame) -> pd.Series:
+    if "runtime_h" in data.columns:
+        return pd.to_numeric(data["runtime_h"], errors="coerce")
+    if "duration_h" in data.columns:
+        return pd.to_numeric(data["duration_h"], errors="coerce")
+    if "runtime_min" in data.columns:
+        return pd.to_numeric(data["runtime_min"], errors="coerce") / 60.0
+    if {"start_h", "end_h"}.issubset(data.columns):
+        return pd.to_numeric(data["end_h"], errors="coerce") - pd.to_numeric(
+            data["start_h"],
+            errors="coerce",
+        )
+    return pd.Series(np.nan, index=data.index, dtype=float)
+
+
+def _filter_journeys(
+    df: pd.DataFrame,
+    *,
+    runtime_h_range: tuple[float, float] | None = (1.0, 8.0),
+    require_no_cross_midnight: bool = True,
+    require_known_distance: bool = True,
+) -> pd.DataFrame:
     data = df.copy()
+    mask = pd.Series(True, index=data.index)
     if "has_cross_midnight" in data.columns:
         cross_midnight = data["has_cross_midnight"].astype(bool)
     elif {"start_h", "end_h"}.issubset(data.columns):
@@ -20,15 +43,26 @@ def _known_non_cross_midnight(df: pd.DataFrame) -> pd.DataFrame:
         )
     else:
         cross_midnight = pd.Series(False, index=data.index)
-    known_distance = pd.to_numeric(data["distance_km"], errors="coerce").notna()
-    if "distance_source" in data.columns:
-        known_distance &= data["distance_source"].astype(str).ne("unknown")
-    return data.loc[known_distance & ~cross_midnight].copy()
+    if require_no_cross_midnight:
+        mask &= ~cross_midnight
+
+    if require_known_distance:
+        known_distance = pd.to_numeric(data["distance_km"], errors="coerce").notna()
+        if "distance_source" in data.columns:
+            known_distance &= data["distance_source"].astype(str).ne("unknown")
+        mask &= known_distance
+
+    if runtime_h_range is not None:
+        lo, hi = runtime_h_range
+        runtimes = _runtime_h(data)
+        mask &= runtimes.ge(float(lo)) & runtimes.le(float(hi))
+
+    return data.loc[mask].copy()
 
 
 def _choose_row(candidates: pd.DataFrame, rng: np.random.Generator) -> pd.Series:
     if candidates.empty:
-        raise ValueError("No coach journeys satisfy known-distance, non-cross-midnight selection.")
+        raise ValueError("No coach journeys satisfy the requested selection filters.")
     pos = int(rng.integers(0, len(candidates)))
     return candidates.iloc[pos].copy()
 
@@ -36,18 +70,38 @@ def _choose_row(candidates: pd.DataFrame, rng: np.random.Generator) -> pd.Series
 def sample_protagonist_journey(
     journeys: pd.DataFrame,
     rng: np.random.Generator,
+    *,
+    runtime_h_range: tuple[float, float] = (1.0, 8.0),
+    require_no_cross_midnight: bool = True,
+    require_known_distance: bool = True,
 ) -> pd.Series:
-    """Randomly sample one known-distance, non-cross-midnight journey."""
-    return _choose_row(_known_non_cross_midnight(journeys), rng)
+    """Randomly sample one coach journey satisfying the basic narrative filters."""
+    candidates = _filter_journeys(
+        journeys,
+        runtime_h_range=runtime_h_range,
+        require_no_cross_midnight=require_no_cross_midnight,
+        require_known_distance=require_known_distance,
+    )
+    return _choose_row(candidates, rng)
 
 
 def sample_contrast_journey(
     journeys: pd.DataFrame,
     rng: np.random.Generator,
     protagonist: pd.Series | str | None = None,
+    *,
+    require_distance_gap: float = 0.5,
+    runtime_h_range: tuple[float, float] = (1.0, 8.0),
+    require_no_cross_midnight: bool = True,
+    require_known_distance: bool = True,
 ) -> pd.Series:
-    """Randomly sample a contrast journey using only the same base filters."""
-    candidates = _known_non_cross_midnight(journeys)
+    """Randomly sample a contrast journey with a materially different distance."""
+    candidates = _filter_journeys(
+        journeys,
+        runtime_h_range=runtime_h_range,
+        require_no_cross_midnight=require_no_cross_midnight,
+        require_known_distance=require_known_distance,
+    )
     key_col = "journey_id" if "journey_id" in candidates.columns else "vehicle_journey_code"
     if protagonist is not None and key_col in candidates.columns:
         protagonist_code = (
@@ -56,18 +110,26 @@ def sample_contrast_journey(
             else str(protagonist)
         )
         candidates = candidates[candidates[key_col].astype(str).ne(protagonist_code)]
+    if protagonist is not None and require_distance_gap is not None:
+        if isinstance(protagonist, pd.Series):
+            protagonist_distance = float(protagonist.get("distance_km"))
+        else:
+            source = journeys
+            if key_col not in source.columns:
+                raise ValueError(f"journeys must contain {key_col} to find protagonist distance.")
+            match = source[source[key_col].astype(str).eq(str(protagonist))]
+            if match.empty:
+                raise ValueError(f"protagonist {protagonist!r} was not found in journeys.")
+            protagonist_distance = float(match.iloc[0]["distance_km"])
+        candidate_distance = pd.to_numeric(candidates["distance_km"], errors="coerce")
+        gap = (candidate_distance - protagonist_distance).abs() / max(protagonist_distance, 1.0)
+        candidates = candidates.loc[gap.ge(float(require_distance_gap))].copy()
     return _choose_row(candidates, rng)
 
 
-def _field(row: Any, key: str, default: Any = "") -> Any:
-    if isinstance(row, pd.Series):
-        return row.get(key, default)
-    if isinstance(row, dict):
-        return row.get(key, default)
-    return getattr(row, key, default)
-
-
 def _float_or_nan(value: Any) -> float:
+    if value == "":
+        return float("nan")
     return float(value) if pd.notna(value) else float("nan")
 
 
@@ -83,7 +145,7 @@ def render_journey_identity_card(
     if feasibility is None and ev_spec is not None:
         feasibility = journey_feasibility(
             _float_or_nan(_field(journey_row, "distance_km")),
-            battery_kwh=_float_or_nan(_field(ev_spec_data, "battery_kwh")),
+            battery_kwh=_float_or_nan(_field(ev_spec_data, "Energy_kWh", _field(ev_spec_data, "battery_kwh"))),
             consumption_kwh_per_km=_float_or_nan(_field(ev_spec_data, "consumption_kwh_per_km")),
         )
     feasibility = feasibility or {}
@@ -105,8 +167,8 @@ def render_journey_identity_card(
         "duration_h": float(duration_h),
         "distance_km": _float_or_nan(_field(journey_row, "distance_km")),
         "distance_source": _field(journey_row, "distance_source", ""),
-        "EV model": _field(ev_spec_data, "model", _field(ev_spec_data, "gen_model", "")),
-        "battery_kwh": _float_or_nan(_field(ev_spec_data, "battery_kwh", float("nan"))),
+        "EV model": _field(ev_spec_data, "Model", _field(ev_spec_data, "model", _field(ev_spec_data, "gen_model", ""))),
+        "battery_kwh": _float_or_nan(_field(ev_spec_data, "Energy_kWh", _field(ev_spec_data, "battery_kwh", float("nan")))),
         "consumption_kwh_per_km": _float_or_nan(_field(ev_spec_data, "consumption_kwh_per_km", float("nan"))),
         "feasible_single_charge": feasibility.get("feasible_single_charge", ""),
         "shortfall_kwh": feasibility.get("shortfall_kwh", float("nan")),

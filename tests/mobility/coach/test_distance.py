@@ -16,11 +16,11 @@ def test_haversine_distance_estimate_uses_detour() -> None:
     )
     seq = pd.DataFrame({"stop_sequence": [1, 2, 3], "stop_point_ref": ["A", "B", "C"]})
 
-    distance, source = vehicle_journey_distance_km(seq, stops, road_detour_factor=1.3)
+    distance, source = vehicle_journey_distance_km(seq, stops, road_detour_factor=1.5)
 
-    expected = (haversine_km(51.5, -0.1, 52.0, -0.2) + haversine_km(52.0, -0.2, 52.5, -0.3)) * 1.3
+    expected = (haversine_km(51.5, -0.1, 52.0, -0.2) + haversine_km(52.0, -0.2, 52.5, -0.3)) * 1.5
     assert distance == pytest.approx(expected)
-    assert source == "haversine_x1.30"
+    assert source == "haversine_x_detour"
 
 
 def test_missing_coordinate_marks_unknown_distance() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,44 @@ def _load_matrix(load_kw: np.ndarray, n_days: int) -> np.ndarray:
     return load_kw.reshape(n_days, STEPS_PER_DAY_DECISION)
 
 
+def _simulate_with_annual_warmup(
+    schedules,
+    battery_kwh: float,
+    *,
+    soc_init: float,
+    warm_up_days: int,
+    chemistry: str,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    if warm_up_days < 0:
+        raise ValueError("warm_up_days must be non-negative.")
+    if warm_up_days == 0:
+        return simulate_single_ev(
+            schedules,
+            battery_kwh,
+            soc_init=soc_init,
+            warm_up_days=0,
+            chemistry=chemistry,
+        )
+    if warm_up_days >= len(schedules):
+        raise ValueError("warm_up_days must be smaller than the annual schedule length.")
+
+    _, _, soc_after_warmup = simulate_single_ev(
+        schedules[: warm_up_days + 1],
+        battery_kwh,
+        soc_init=soc_init,
+        warm_up_days=warm_up_days,
+        chemistry=chemistry,
+    )
+    soc, load_kw, _ = simulate_single_ev(
+        schedules,
+        battery_kwh,
+        soc_init=soc_after_warmup,
+        warm_up_days=0,
+        chemistry=chemistry,
+    )
+    return soc, load_kw, float(soc_after_warmup)
+
+
 def simulate_block_year(
     block_df: pd.DataFrame,
     active_dates,
@@ -78,15 +117,30 @@ def simulate_block_year(
     layover_charge_kw: float = 0.0,
     min_layover_for_charging_h: float = 0.0,
     chemistry: str = DEFAULT_CHEMISTRY,
+    warm_up_days: int = 0,
+    keep_soc: bool = True,
+    keep_load_matrix: bool = True,
 ) -> dict:
-    """Simulate one bus block across a dated feed-year window."""
+    """Simulate one bus block across a dated feed-year window.
+
+    ``warm_up_days`` defaults to 0 for fast notebook smoke tests. For
+    production scale runs, use ``WARMUP_DAYS`` (currently 14) to let the first
+    reported day start from a near-steady-state SOC instead of the ``soc_init``
+    assumption.
+
+    Memory: with ``keep_soc=True`` and ``keep_load_matrix=True``, each block
+    result holds full-year SOC plus load arrays. For fleet-wide loops, prefer
+    ``simulate_fleet_year`` or pass ``keep_soc=False`` and
+    ``keep_load_matrix=False`` explicitly.
+    """
     battery_kwh = float(_spec_value(vehicle_spec, "battery_kwh"))
     consumption_kwh_per_km = float(_spec_value(vehicle_spec, "consumption_kwh_per_km"))
     depot_charge_kw = float(_spec_value(vehicle_spec, "depot_charge_kw"))
     block_id = str(block_df["block_id"].iloc[0]) if "block_id" in block_df else "bus_block"
+    active_dates_tuple = tuple(active_dates)
     schedules = block_to_year_schedules(
         block_df,
-        active_dates,
+        active_dates_tuple,
         start_date=start_date,
         end_date=end_date,
         ev_id=f"bus_{block_id}",
@@ -96,21 +150,19 @@ def simulate_block_year(
         layover_charge_kw=layover_charge_kw,
         min_layover_for_charging_h=min_layover_for_charging_h,
     )
-    soc, load_kw, soc_after_warmup = simulate_single_ev(
+    soc, load_kw, soc_after_warmup = _simulate_with_annual_warmup(
         schedules,
         battery_kwh,
         soc_init=soc_init,
-        warm_up_days=0,
+        warm_up_days=warm_up_days,
         chemistry=chemistry,
     )
+    load_matrix = _load_matrix(load_kw, len(schedules))
     trip_distance_km = float(sum(trip.distance_km for schedule in schedules for trip in schedule.trips))
     trip_energy_kwh = float(sum(trip.energy_consumed_kwh for schedule in schedules for trip in schedule.trips))
     energy_charged_kwh = float(np.sum(load_kw) * STEP_HOURS_DECISION)
-    return {
+    result = {
         "schedules": schedules,
-        "soc": soc,
-        "load_kw": load_kw,
-        "load_matrix_kw": _load_matrix(load_kw, len(schedules)),
         "soc_after_warmup": float(soc_after_warmup),
         "soc_end": float(soc[-1]),
         "soc_min": float(soc.min()),
@@ -119,12 +171,22 @@ def simulate_block_year(
         "energy_charged_kwh": energy_charged_kwh,
         "depot_kwh": _parking_energy_kwh(schedules, "depot_terminus"),
         "layover_kwh": _parking_energy_kwh(schedules, "layover"),
-        "active_days": int(len(set(active_dates))),
+        "active_days": int(len(set(active_dates_tuple))),
+        "n_active_dates": int(len(set(active_dates_tuple))),
         "n_schedule_days": int(len(schedules)),
+        "n_overlap_warnings": int(
+            sum(getattr(schedule, "metadata", {}).get("n_trip_overlaps", 0) for schedule in schedules)
+        ),
         "battery_kwh": battery_kwh,
         "consumption_kwh_per_km": consumption_kwh_per_km,
         "depot_charge_kw": depot_charge_kw,
     }
+    if keep_soc:
+        result["soc"] = soc
+    if keep_load_matrix:
+        result["load_kw"] = load_kw
+        result["load_matrix_kw"] = load_matrix
+    return result
 
 
 def simulate_fleet_year(
@@ -138,11 +200,21 @@ def simulate_fleet_year(
     depot_charge_kw: float | None = None,
     start_date: str | dt.date | pd.Timestamp = FEED_YEAR_START,
     end_date: str | dt.date | pd.Timestamp = FEED_YEAR_END,
+    soc_init: float = 1.0,
+    warm_up_days: int = 0,
     max_blocks: int | None = None,
     progress_interval: int = 0,
     **kwargs,
 ) -> tuple[pd.DataFrame, np.ndarray]:
-    """Simulate a bus block fleet over the feed-year and aggregate annual load."""
+    """Simulate a bus block fleet over the feed-year and aggregate annual load.
+
+    ``warm_up_days`` defaults to 0 for notebook smoke runs. For production
+    annual runs, pass ``mobility.core.constants.WARMUP_DAYS`` to reduce
+    first-day SOC bias while retaining the full dated output window.
+    """
+    block_kwargs = dict(kwargs)
+    block_kwargs.pop("keep_soc", None)
+    block_kwargs.pop("keep_load_matrix", None)
     groups = blocks_df.groupby("block_id", sort=False)
     block_ids = list(groups.groups)
     if max_blocks is not None:
@@ -176,13 +248,27 @@ def simulate_fleet_year(
                 "depot_charge_kw": depot_charge_kw,
             }
         service_id = str(block_df["service_id"].iloc[0])
+        active_dates = service_date_index.get(service_id)
+        if active_dates is None:
+            warnings.warn(
+                f"block_id={block_id!r} has service_id={service_id!r} not present "
+                "in calendar (or calendar_dates) - block will produce zero distance "
+                "for the entire feed year. Check calendar.txt parsing and dtype.",
+                UserWarning,
+                stacklevel=2,
+            )
+            active_dates = ()
         result = simulate_block_year(
             block_df,
-            service_date_index.get(service_id, ()),
+            active_dates,
             vehicle_spec,
             start_date=start_date,
             end_date=end_date,
-            **kwargs,
+            soc_init=soc_init,
+            warm_up_days=warm_up_days,
+            keep_soc=False,
+            keep_load_matrix=True,
+            **block_kwargs,
         )
         fleet_load_kw += result["load_matrix_kw"]
         record = {
@@ -192,7 +278,9 @@ def simulate_fleet_year(
             "block_source": block_df["block_source"].iloc[0],
             "n_trips_template": int(len(block_df)),
             "active_days": result["active_days"],
+            "n_active_dates": result["n_active_dates"],
             "n_schedule_days": result["n_schedule_days"],
+            "n_overlap_warnings": result["n_overlap_warnings"],
             "annual_distance_km": result["annual_distance_km"],
             "annual_energy_kwh": result["annual_energy_kwh"],
             "energy_charged_kwh": result["energy_charged_kwh"],
@@ -219,6 +307,14 @@ def simulate_fleet_year(
     per_block = pd.DataFrame.from_records(records)
     if not per_block.empty:
         per_block = per_block.set_index("block_id")
+        n_blocks_with_zero_active_dates = int((per_block["n_active_dates"] == 0).sum())
+        if n_blocks_with_zero_active_dates > 0:
+            warnings.warn(
+                f"{n_blocks_with_zero_active_dates} blocks had zero active dates "
+                "in the feed year (likely service_id mismatch).",
+                UserWarning,
+                stacklevel=2,
+            )
     per_block.attrs["start_date"] = _coerce_date(start_date).isoformat()
     per_block.attrs["end_date"] = _coerce_date(end_date).isoformat()
     return per_block, fleet_load_kw
@@ -236,18 +332,19 @@ def annual_load_matrix_to_frame(
             f"load_matrix_kw must have shape {(len(dates), STEPS_PER_DAY_DECISION)}, "
             f"got {load_matrix_kw.shape}."
         )
-    records = []
-    for day_index, date_value in enumerate(dates):
-        for step in range(STEPS_PER_DAY_DECISION):
-            records.append(
-                {
-                    "date": date_value,
-                    "step": step,
-                    "hour": float(step * STEP_HOURS_DECISION),
-                    "load_kw": float(load_matrix_kw[day_index, step]),
-                }
-            )
-    return pd.DataFrame.from_records(records)
+    n_days, n_steps = load_matrix_kw.shape
+    steps = np.tile(np.arange(n_steps), n_days)
+    hours = steps.astype(float) * STEP_HOURS_DECISION
+    return pd.DataFrame(
+        {
+            "date": np.repeat(np.array(dates, dtype="datetime64[ns]"), n_steps),
+            "step": steps,
+            "step_index": steps,
+            "hour": hours,
+            "hour_of_day": hours,
+            "load_kw": load_matrix_kw.ravel(),
+        }
+    )
 
 
 def write_annual_results(

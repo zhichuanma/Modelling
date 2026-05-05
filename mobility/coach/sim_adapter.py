@@ -10,16 +10,17 @@ import pandas as pd
 from mobility.core.constants import DEFAULT_CHEMISTRY, STEP_HOURS_DECISION
 from mobility.core.simulator import simulate_single_ev
 
+from ._compat import field
 from .feasibility import journey_feasibility
 from .trip_chain_coach import journey_to_daily_schedules
 
 
-def _spec_value(ev_spec: Any, key: str, default: Any = None) -> Any:
-    if isinstance(ev_spec, pd.Series):
-        return ev_spec.get(key, default)
-    if isinstance(ev_spec, dict):
-        return ev_spec.get(key, default)
-    return getattr(ev_spec, key, default)
+DEFAULT_TERMINUS_CHARGE_KW = 50.0
+
+
+def _battery_kwh(ev_spec: Any) -> float:
+    value = field(ev_spec, "Energy_kWh", field(ev_spec, "battery_kwh"))
+    return float(value)
 
 
 def _first_floor_hit_h(soc: np.ndarray) -> float | None:
@@ -29,20 +30,50 @@ def _first_floor_hit_h(soc: np.ndarray) -> float | None:
     return float((int(hits[0]) + 1) * STEP_HOURS_DECISION)
 
 
+def _energy_in_window_kwh(load_kw: np.ndarray, start_h: float, end_h: float, step_h: float) -> float:
+    start_idx = max(0, int(round(start_h / step_h)))
+    end_idx = min(len(load_kw), int(round(end_h / step_h)))
+    if end_idx <= start_idx:
+        return 0.0
+    return float(load_kw[start_idx:end_idx].sum() * step_h)
+
+
+def _parking_load_energy_kwh(
+    schedules: list,
+    load_kw: np.ndarray,
+    *,
+    purpose: str,
+    step_h: float,
+) -> float:
+    total = 0.0
+    for schedule in schedules:
+        day_offset_h = float(schedule.day) * 24.0
+        for event in schedule.parking_events:
+            if event.location_purpose != purpose:
+                continue
+            total += _energy_in_window_kwh(
+                load_kw,
+                day_offset_h + float(event.start_time),
+                day_offset_h + float(event.end_time),
+                step_h,
+            )
+    return float(total)
+
+
 def simulate_coach_journey(
     journey_row: Any,
     stop_seq: pd.DataFrame,
     ev_spec: Any,
     *,
-    terminus_charge_kw: float = 50.0,
+    terminus_charge_kw: float = DEFAULT_TERMINUS_CHARGE_KW,
     soc_init: float = 1.0,
     safety_margin: float = 0.05,
     chemistry: str = DEFAULT_CHEMISTRY,
 ) -> dict:
     """Run one coach journey through feasibility then SOC simulation."""
-    battery_kwh = float(_spec_value(ev_spec, "battery_kwh"))
-    consumption_kwh_per_km = float(_spec_value(ev_spec, "consumption_kwh_per_km"))
-    distance_km = float(journey_row["distance_km"] if isinstance(journey_row, pd.Series) else _spec_value(journey_row, "distance_km"))
+    battery_kwh = _battery_kwh(ev_spec)
+    consumption_kwh_per_km = float(field(ev_spec, "consumption_kwh_per_km"))
+    distance_km = float(field(journey_row, "distance_km"))
 
     feasibility = journey_feasibility(
         distance_km,
@@ -68,15 +99,14 @@ def simulate_coach_journey(
         sum(trip.energy_consumed_kwh for schedule in schedules for trip in schedule.trips)
     )
     energy_charged_kwh = float(np.sum(load_kw) * STEP_HOURS_DECISION)
-    terminus_kwh = float(
-        sum(
-            event.energy_charged_kwh
-            for schedule in schedules
-            for event in schedule.parking_events
-            if event.location_purpose == "terminus_dwell"
-        )
+    terminus_kwh = _parking_load_energy_kwh(
+        schedules,
+        load_kw,
+        purpose="terminus_dwell",
+        step_h=STEP_HOURS_DECISION,
     )
     soc_floor_hit_h = _first_floor_hit_h(soc)
+    ev_model = field(ev_spec, "Model", field(ev_spec, "model", ""))
 
     return {
         "schedules": schedules,
@@ -90,6 +120,7 @@ def simulate_coach_journey(
         "terminus_kwh": terminus_kwh,
         "total_km": total_km,
         "total_consumed_kwh": total_consumed_kwh,
+        "ev_model": str(ev_model),
         "battery_kwh": battery_kwh,
         "consumption_kwh_per_km": consumption_kwh_per_km,
         "terminus_charge_kw": float(terminus_charge_kw),

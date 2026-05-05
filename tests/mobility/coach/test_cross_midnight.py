@@ -13,7 +13,7 @@ def test_cross_midnight_journey_splits_energy_by_duration() -> None:
             "start_h": 23.0,
             "end_h": 25.0,
             "distance_km": 120.0,
-            "distance_source": "haversine_x1.30",
+            "distance_source": "haversine_x_detour",
         }
     )
     stops = pd.DataFrame({"stop_sequence": [1, 2], "stop_point_ref": ["A", "B"]})

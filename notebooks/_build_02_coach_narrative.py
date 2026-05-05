@@ -23,7 +23,7 @@ cells.append(
         """
         # 02 Single Coach Simulation
 
-        This notebook follows one long-distance coach `vehicle_journey_code` from TransXChange timing data into a single-charge feasibility check and SOC simulation. Coach journeys are modelled at journey level, not block level: distance is estimated from stop coordinates with `haversine x 1.30`, and infeasible journeys are labelled before the simulator can clamp SOC to zero.
+        This notebook follows one long-distance coach `vehicle_journey_code` from TransXChange timing data into a single-charge feasibility check and SOC simulation. Coach journeys are modelled at journey level, not block level: distance is estimated from stop coordinates with a fixed detour factor, and infeasible journeys are labelled before the simulator can clamp SOC to zero.
         """
     )
 )
@@ -171,15 +171,32 @@ cells.append(
     code(
         """
         coach_fleet = load_coach_fleet()
+        coach_fleet_display = coach_fleet.copy()
+        coach_fleet_display["range_km"] = coach_fleet_display["Energy_kWh"] / coach_fleet_display["consumption_kwh_per_km"]
+        unique_coach_specs = (
+            coach_fleet_display.drop_duplicates(["Model", "Energy_kWh", "consumption_kwh_per_km"])
+            .sort_values("Model")
+            .reset_index(drop=True)
+        )
         display(
-            coach_fleet[
-                ["model", "count", "battery_kwh", "consumption_kwh_per_km", "range_km", "battery_source", "consumption_source", "is_simulatable"]
-            ].sort_values("model")
+            unique_coach_specs[
+                [
+                    "EV_ID",
+                    "Model",
+                    "Energy_kWh",
+                    "DC_Power_kW",
+                    "AC_Power_kW",
+                    "efficiency_wh_per_km",
+                    "consumption_kwh_per_km",
+                    "LSOA_code",
+                    "count",
+                ]
+            ]
         )
 
         fig, ax = plt.subplots(figsize=(12, 4.5), dpi=110)
-        ordered_fleet = coach_fleet.sort_values("range_km")
-        ax.barh(ordered_fleet["model"], ordered_fleet["range_km"], color="tab:green", alpha=0.78)
+        ordered_fleet = unique_coach_specs.sort_values("range_km")
+        ax.barh(ordered_fleet["Model"], ordered_fleet["range_km"], color="tab:green", alpha=0.78)
         ax.set(xlabel="Estimated range (km)", title="Coach EV specs from prepared vehicle table")
         ax.grid(axis="x", alpha=0.25)
         plt.tight_layout()
@@ -196,7 +213,7 @@ cells.append(
         rng = np.random.default_rng(MAIN_COACH_SEED)
         protagonist = sample_protagonist_journey(all_journeys, rng)
         contrast = sample_contrast_journey(all_journeys, rng, protagonist)
-        ev_spec = sample_coach_ev(rng, weight_by_count=True, fleet=coach_fleet)
+        ev_spec = sample_coach_ev(coach_fleet, rng, weight_by_count=True)
 
         protagonist_stops = all_stop_sequences[all_stop_sequences["journey_id"] == protagonist["journey_id"]].sort_values("stop_sequence")
         contrast_stops = all_stop_sequences[all_stop_sequences["journey_id"] == contrast["journey_id"]].sort_values("stop_sequence")
@@ -257,7 +274,7 @@ cells.append(
         """
         feasibility = journey_feasibility(
             protagonist["distance_km"],
-            battery_kwh=ev_spec["battery_kwh"],
+            battery_kwh=ev_spec["Energy_kWh"],
             consumption_kwh_per_km=ev_spec["consumption_kwh_per_km"],
         )
         result = simulate_coach_journey(protagonist, protagonist_stops, ev_spec, terminus_charge_kw=50.0, soc_init=1.0)
@@ -288,13 +305,18 @@ cells.append(
     code(
         """
         candidates = all_journeys[all_journeys["distance_km"].notna()].copy()
-        simulatable_fleet = coach_fleet[coach_fleet["is_simulatable"]].copy()
+        simulatable_fleet = coach_fleet.drop_duplicates(["Model", "Energy_kWh", "consumption_kwh_per_km"]).copy()
         frontier_rows = []
         for _, ev in simulatable_fleet.iterrows():
-            required = candidates["distance_km"] * ev["consumption_kwh_per_km"]
-            feasible = required <= ev["battery_kwh"] * 0.95
+            feasible = candidates["distance_km"].apply(
+                lambda km: journey_feasibility(
+                    float(km),
+                    battery_kwh=float(ev["Energy_kWh"]),
+                    consumption_kwh_per_km=float(ev["consumption_kwh_per_km"]),
+                )["feasible_single_charge"]
+            )
             for operator, values in feasible.groupby(candidates["operator_code"]):
-                frontier_rows.append({"EV model": ev["model"], "operator": operator, "pct_feasible": float(values.mean() * 100.0)})
+                frontier_rows.append({"EV model": ev["Model"], "operator": operator, "pct_feasible": float(values.mean() * 100.0)})
         frontier = pd.DataFrame(frontier_rows)
         heat = frontier.pivot(index="operator", columns="EV model", values="pct_feasible").fillna(0.0)
         fig, ax = plt.subplots(figsize=(12, 4.5), dpi=110)

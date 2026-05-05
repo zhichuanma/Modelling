@@ -94,8 +94,21 @@ def active_dates_for_service(
     sid = str(service_id)
     start = _coerce_date(start_date)
     end = _coerce_date(end_date)
-    active: set[dt.date] = set()
     service_rows = calendar.calendar[calendar.calendar["service_id"].eq(sid)]
+    exceptions = calendar.calendar_dates[
+        calendar.calendar_dates["service_id"].eq(sid)
+        & calendar.calendar_dates["date_dt"].between(start, end)
+    ]
+    return _active_dates_from_rows(service_rows, exceptions, start, end)
+
+
+def _active_dates_from_rows(
+    service_rows: pd.DataFrame,
+    exceptions: pd.DataFrame,
+    start: dt.date,
+    end: dt.date,
+) -> tuple[dt.date, ...]:
+    active: set[dt.date] = set()
     for row in service_rows.itertuples(index=False):
         row_start = max(start, row.start_date_dt)
         row_end = min(end, row.end_date_dt)
@@ -105,10 +118,6 @@ def active_dates_for_service(
             if getattr(row, WEEKDAY_COLUMNS[day.weekday()]) == 1:
                 active.add(day)
 
-    exceptions = calendar.calendar_dates[
-        calendar.calendar_dates["service_id"].eq(sid)
-        & calendar.calendar_dates["date_dt"].between(start, end)
-    ]
     for row in exceptions.itertuples(index=False):
         if int(row.exception_type) == 1:
             active.add(row.date_dt)
@@ -126,7 +135,22 @@ def build_service_date_index(
     """Build a service_id -> active dates mapping for a simulation window."""
     service_calendar = load_service_calendar() if calendar is None else calendar
     unique_service_ids = sorted({str(service_id) for service_id in service_ids})
+    start = _coerce_date(start_date)
+    end = _coerce_date(end_date)
+    calendar_groups = {
+        service_id: frame
+        for service_id, frame in service_calendar.calendar.groupby("service_id", sort=False)
+    }
+    exception_groups = {
+        service_id: frame[frame["date_dt"].between(start, end)]
+        for service_id, frame in service_calendar.calendar_dates.groupby("service_id", sort=False)
+    }
     return {
-        service_id: active_dates_for_service(service_id, start_date, end_date, service_calendar)
+        service_id: _active_dates_from_rows(
+            calendar_groups.get(service_id, service_calendar.calendar.iloc[0:0]),
+            exception_groups.get(service_id, service_calendar.calendar_dates.iloc[0:0]),
+            start,
+            end,
+        )
         for service_id in unique_service_ids
     }

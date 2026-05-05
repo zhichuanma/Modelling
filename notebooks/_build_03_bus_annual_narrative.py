@@ -163,6 +163,7 @@ cells.append(
             FEED_YEAR_START,
             FEED_YEAR_END,
             soc_init=1.0,
+            warm_up_days=0,
         )
         display(
             pd.DataFrame(
@@ -197,7 +198,7 @@ cells.append(md("## D. Small Fleet Annual Load"))
 cells.append(
     code(
         """
-        sample_block_ids = candidates.sample(n=min(8, len(candidates)), random_state=MAIN_BUS_ANNUAL_SEED).index.astype(str)
+        sample_block_ids = candidates.sample(n=min(4, len(candidates)), random_state=MAIN_BUS_ANNUAL_SEED).index.astype(str)
         small_fleet_blocks = all_blocks[all_blocks["block_id"].astype(str).isin(sample_block_ids)].copy()
         fleet_per_block, fleet_load_kw = simulate_fleet_year(
             small_fleet_blocks,
@@ -206,6 +207,7 @@ cells.append(
             vehicle_rng=np.random.default_rng(MAIN_BUS_ANNUAL_SEED + 1),
             start_date=FEED_YEAR_START,
             end_date=FEED_YEAR_END,
+            warm_up_days=0,
             progress_interval=4,
         )
         display(fleet_per_block[[
@@ -251,7 +253,172 @@ cells.append(
     )
 )
 
-cells.append(md("## E. Honest Labels"))
+cells.append(md("## E. Annual Story Slices"))
+
+cells.append(
+    code(
+        """
+        daily_energy_frame = pd.DataFrame(
+            {
+                "date": dates,
+                "daily_total_kwh": daily_energy,
+                "day_type": np.where(dates.dayofweek < 5, "weekday", "weekend"),
+            }
+        )
+        active_daily_energy = daily_energy_frame[daily_energy_frame["daily_total_kwh"].gt(0.0)].copy()
+        weekday_weekend_summary = (
+            active_daily_energy.groupby("day_type")["daily_total_kwh"]
+            .agg(["count", "mean", "median", "min", "max"])
+            .reset_index()
+        )
+        if {"weekday", "weekend"}.issubset(set(weekday_weekend_summary["day_type"])):
+            weekday_mean = float(weekday_weekend_summary.loc[weekday_weekend_summary["day_type"].eq("weekday"), "mean"].iloc[0])
+            weekend_mean = float(weekday_weekend_summary.loc[weekday_weekend_summary["day_type"].eq("weekend"), "mean"].iloc[0])
+            delta_pct = 100.0 * (weekend_mean - weekday_mean) / weekday_mean if weekday_mean else 0.0
+            observation = (
+                f"Weekend active-day charging is {abs(delta_pct):.1f}% lower than weekday charging."
+                if delta_pct < -5.0
+                else "The representative service sample does not show a strong weekday/weekend split."
+            )
+        else:
+            observation = "The smoke sample does not contain both active weekday and active weekend service days."
+        display(weekday_weekend_summary)
+        display(pd.DataFrame([{"slice": "weekday_vs_weekend", "observation": observation}]))
+
+        fig, ax = plt.subplots(figsize=(8.5, 4.5), dpi=110)
+        if not active_daily_energy.empty:
+            active_daily_energy.boxplot(column="daily_total_kwh", by="day_type", ax=ax, grid=False)
+            ax.set_title("Active-day fleet charging: weekday vs weekend")
+            ax.set_xlabel("")
+            ax.set_ylabel("kWh/day")
+            fig.suptitle("")
+            ax.grid(alpha=0.25)
+        plt.tight_layout()
+        plt.show()
+        """
+    )
+)
+
+cells.append(
+    code(
+        """
+        holiday_windows = [
+            ("Christmas week", pd.Timestamp("2026-12-22"), pd.Timestamp("2026-12-28")),
+            ("Easter week", pd.Timestamp("2027-03-22"), pd.Timestamp("2027-03-28")),
+        ]
+        baseline_mean = float(daily_energy_frame["daily_total_kwh"].mean())
+        holiday_rows = []
+        fig, ax = plt.subplots(figsize=(12, 4.5), dpi=110)
+        ax.plot(daily_energy_frame["date"], daily_energy_frame["daily_total_kwh"], color="tab:blue", lw=1.2)
+        for label, start, end in holiday_windows:
+            mask = daily_energy_frame["date"].between(start, end)
+            window_mean = float(daily_energy_frame.loc[mask, "daily_total_kwh"].mean())
+            change_pct = 100.0 * (window_mean - baseline_mean) / baseline_mean if baseline_mean else 0.0
+            holiday_rows.append(
+                {
+                    "window": label,
+                    "start": start.date().isoformat(),
+                    "end": end.date().isoformat(),
+                    "mean_kwh": round(window_mean, 2),
+                    "vs_feed_mean_pct": round(change_pct, 1),
+                    "interpretation": (
+                        "visible holiday-week reduction"
+                        if change_pct < -5.0
+                        else "no clear holiday reduction in the GTFS representative service assumption"
+                    ),
+                }
+            )
+            ax.axvspan(start, end, alpha=0.16, label=label)
+        ax.set(title="Holiday-week call-outs on annual fleet charging", ylabel="kWh/day")
+        ax.legend()
+        ax.grid(alpha=0.25)
+        plt.tight_layout()
+        plt.show()
+        display(pd.DataFrame(holiday_rows))
+        """
+    )
+)
+
+cells.append(
+    code(
+        """
+        hourly_load_kw = fleet_load_kw.reshape(len(dates), 24, 4).mean(axis=2)
+        monthly_hourly_load = (
+            pd.DataFrame(hourly_load_kw, index=dates, columns=np.arange(24))
+            .groupby(lambda value: value.month)
+            .mean()
+            .reindex(range(1, 13))
+        )
+        fig, ax = plt.subplots(figsize=(11, 5), dpi=110)
+        image = ax.imshow(monthly_hourly_load, aspect="auto", cmap="viridis")
+        ax.set(
+            title="Mean fleet load by month and hour of day",
+            xlabel="hour of day",
+            ylabel="month",
+        )
+        ax.set_xticks(np.arange(0, 24, 2))
+        ax.set_yticks(np.arange(12))
+        ax.set_yticklabels(range(1, 13))
+        fig.colorbar(image, ax=ax, label="kW")
+        plt.tight_layout()
+        plt.show()
+        """
+    )
+)
+
+cells.append(
+    code(
+        """
+        contrast_specs = [
+            ("active-heavy", block_stats[block_stats["active_days"].gt(300)].sort_values("active_days", ascending=False)),
+            ("sparse-service", block_stats[block_stats["active_days"].between(1, 49)].sort_values("active_days")),
+        ]
+        contrast_rows = []
+        fig, ax = plt.subplots(figsize=(12, 4.5), dpi=110)
+        for label, options in contrast_specs:
+            if options.empty:
+                contrast_rows.append({"slice": label, "block_id": None, "active_days": 0, "note": "no matching block in this feed"})
+                continue
+            block_id = str(options.index[0])
+            block = all_blocks[all_blocks["block_id"].astype(str).eq(block_id)].copy()
+            service_id = str(block["service_id"].iloc[0])
+            vehicle = sample_bus_vehicle_specs(
+                vehicle_params,
+                np.random.default_rng(MAIN_BUS_ANNUAL_SEED + len(contrast_rows) + 10),
+                n=1,
+            ).iloc[0]
+            result = simulate_block_year(
+                block,
+                service_date_index.get(service_id, ()),
+                vehicle,
+                FEED_YEAR_START,
+                FEED_YEAR_END,
+                warm_up_days=0,
+            )
+            soc_by_day = result["soc"].reshape(len(dates), STEPS_PER_DAY)
+            ax.plot(dates, soc_by_day[:, -1], lw=1.3, label=f"{label}: {block_id}")
+            contrast_rows.append(
+                {
+                    "slice": label,
+                    "block_id": block_id,
+                    "active_days": result["n_active_dates"],
+                    "soc_min": round(result["soc_min"], 4),
+                    "soc_end": round(result["soc_end"], 4),
+                    "vehicle_gen_model": vehicle["gen_model"],
+                    "note": "simulated",
+                }
+            )
+        ax.set(title="Active-heavy vs sparse-service block SOC", ylabel="end-of-day SOC")
+        ax.legend()
+        ax.grid(alpha=0.25)
+        plt.tight_layout()
+        plt.show()
+        display(pd.DataFrame(contrast_rows))
+        """
+    )
+)
+
+cells.append(md("## F. Honest Labels"))
 
 cells.append(
     code(
@@ -262,6 +429,7 @@ cells.append(
                 ("SOC policy", "continuous", "SOC carries across active and inactive days."),
                 ("Inactive days", "all-day depot_terminus", "They allow charging recovery between service days."),
                 ("Fleet scale", f"{len(sample_block_ids)} sampled blocks", "The notebook is intentionally small; full fleet uses the same simulate_fleet_year API."),
+                ("Warm-up", "warm_up_days=0", "Smoke runs stay fast; production annual runs should use WARMUP_DAYS=14 for a steadier first reported day."),
                 ("Smoke outputs", f"{BUS_ANNUAL_SMOKE_PER_BLOCK_PATH.name}; {BUS_ANNUAL_SMOKE_LOAD_PROFILE_PATH.name}", "These files are smoke artifacts, not full-fleet production outputs."),
                 ("Depot model", "depot_terminus abstraction", "No real depot assignment has been added yet."),
                 ("Vehicle assignment", "one sampled EV spec per block", "The sampled bus model remains fixed for that block's feed-year."),

@@ -9,16 +9,10 @@ import pandas as pd
 from mobility.core.constants import STEP_HOURS_DECISION, STEPS_PER_DAY_DECISION
 from mobility.core.data_structures import DailySchedule, ParkingEvent, Trip
 
+from ._compat import field
+
 
 HOURS_PER_DAY = float(STEPS_PER_DAY_DECISION) * float(STEP_HOURS_DECISION)
-
-
-def _row_get(row: Any, key: str, default: Any = None) -> Any:
-    if isinstance(row, pd.Series):
-        return row.get(key, default)
-    if isinstance(row, dict):
-        return row.get(key, default)
-    return getattr(row, key, default)
 
 
 def _clock_to_hours(value: Any) -> float:
@@ -36,19 +30,25 @@ def _clock_to_hours(value: Any) -> float:
 
 
 def _journey_times(row: Any) -> tuple[float, float]:
-    start_h = _row_get(row, "start_h", None)
-    end_h = _row_get(row, "end_h", None)
-    start = float(start_h) if start_h is not None and pd.notna(start_h) else _clock_to_hours(_row_get(row, "departure_time"))
-    end = float(end_h) if end_h is not None and pd.notna(end_h) else _clock_to_hours(_row_get(row, "arrival_time"))
-    runtime_min = _row_get(row, "runtime_min", None)
+    start_h = field(row, "start_h", None)
+    end_h = field(row, "end_h", None)
+    start = float(start_h) if start_h is not None and pd.notna(start_h) else _clock_to_hours(field(row, "departure_time"))
+    end = float(end_h) if end_h is not None and pd.notna(end_h) else _clock_to_hours(field(row, "arrival_time"))
+    runtime_min = field(row, "runtime_min", None)
     if pd.notna(runtime_min) and (not pd.notna(end) or end <= start):
         end = start + float(runtime_min) / 60.0
     if not pd.notna(start) or not pd.notna(end):
         raise ValueError("journey_row must provide start/end hours or departure/arrival times.")
     if end <= start:
         raise ValueError("coach journey end_h must be greater than start_h.")
-    if start < 0.0 or end > 2.0 * HOURS_PER_DAY:
-        raise ValueError("coach journey schedules may span at most one wrapped service day.")
+    if start < 0.0:
+        raise ValueError("start_h must be non-negative.")
+    if start >= HOURS_PER_DAY:
+        raise ValueError(
+            f"start_h={start} must be < 24 (vehicle journeys never start in 'next day' clock)."
+        )
+    if end > 2.0 * HOURS_PER_DAY:
+        raise ValueError(f"end_h={end} exceeds 48h; cross-midnight beyond day1 not supported.")
     return float(start), float(end)
 
 
@@ -118,14 +118,14 @@ def journey_to_daily_schedules(
         raise ValueError("pre_journey_dwell_h must be non-negative.")
 
     start_h, end_h = _journey_times(journey_row)
-    distance_km = _row_get(journey_row, "distance_km", None)
+    distance_km = field(journey_row, "distance_km", None)
     if distance_km is None or pd.isna(distance_km):
         raise ValueError("journey_row must contain a known distance_km.")
     distance_km = float(distance_km)
     if distance_km < 0.0:
         raise ValueError("distance_km must be non-negative.")
 
-    journey_code = str(_row_get(journey_row, "vehicle_journey_code", "coach_journey"))
+    journey_code = str(field(journey_row, "vehicle_journey_code", "coach_journey"))
     ev_id = f"coach_{journey_code}"
     segments = _split_trip(start_h, end_h)
     schedules = {
@@ -143,8 +143,8 @@ def journey_to_daily_schedules(
             origin_purpose="coach_stop",
             destination_purpose="coach_stop",
             energy_consumed_kwh=float(segment_distance_km * consumption_kwh_per_km),
-            origin_lsoa=str(_row_get(journey_row, "start_lsoa", "") or ""),
-            destination_lsoa=str(_row_get(journey_row, "end_lsoa", "") or ""),
+            origin_lsoa=str(field(journey_row, "start_lsoa", "") or ""),
+            destination_lsoa=str(field(journey_row, "end_lsoa", "") or ""),
         )
         for col in (
             "operator_code",
@@ -156,7 +156,7 @@ def journey_to_daily_schedules(
             "start_stop_ref",
             "end_stop_ref",
         ):
-            setattr(trip, col, _row_get(journey_row, col, ""))
+            setattr(trip, col, field(journey_row, col, ""))
         trip.original_start_h = float(start_h)
         trip.original_end_h = float(end_h)
         trip.day_segment = int(day)
@@ -165,13 +165,13 @@ def journey_to_daily_schedules(
     first_day = segments[0][0]
     first_start = segments[0][1]
     pre_start = max(0.0, first_start - float(pre_journey_dwell_h))
-    pre_event = _terminus_event(pre_start, first_start, terminus_charge_kw, location_lsoa=str(_row_get(journey_row, "start_lsoa", "") or ""))
+    pre_event = _terminus_event(pre_start, first_start, terminus_charge_kw, location_lsoa=str(field(journey_row, "start_lsoa", "") or ""))
     if pre_event is not None:
         schedules[first_day].parking_events.append(pre_event)
 
     last_day = segments[-1][0]
     last_end = segments[-1][2]
-    post_event = _terminus_event(last_end, HOURS_PER_DAY, terminus_charge_kw, location_lsoa=str(_row_get(journey_row, "end_lsoa", "") or ""))
+    post_event = _terminus_event(last_end, HOURS_PER_DAY, terminus_charge_kw, location_lsoa=str(field(journey_row, "end_lsoa", "") or ""))
     if post_event is not None:
         schedules[last_day].parking_events.append(post_event)
 
@@ -182,13 +182,13 @@ def journey_to_daily_schedules(
         schedule.parking_events.sort(key=lambda event: event.start_time)
         schedule.metadata = {
             "vehicle_journey_code": journey_code,
-            "operator_code": str(_row_get(journey_row, "operator_code", "")),
-            "operator_name": str(_row_get(journey_row, "operator_name", "")),
-            "line_name": str(_row_get(journey_row, "line_name", "")),
-            "start_stop_ref": _stop_text(stop_seq, "first", "stop_point_ref", str(_row_get(journey_row, "start_stop_ref", ""))),
-            "end_stop_ref": _stop_text(stop_seq, "last", "stop_point_ref", str(_row_get(journey_row, "end_stop_ref", ""))),
-            "start_stop_name": _stop_text(stop_seq, "first", "common_name", str(_row_get(journey_row, "start_stop_name", ""))),
-            "end_stop_name": _stop_text(stop_seq, "last", "common_name", str(_row_get(journey_row, "end_stop_name", ""))),
+            "operator_code": str(field(journey_row, "operator_code", "")),
+            "operator_name": str(field(journey_row, "operator_name", "")),
+            "line_name": str(field(journey_row, "line_name", "")),
+            "start_stop_ref": _stop_text(stop_seq, "first", "stop_point_ref", str(field(journey_row, "start_stop_ref", ""))),
+            "end_stop_ref": _stop_text(stop_seq, "last", "stop_point_ref", str(field(journey_row, "end_stop_ref", ""))),
+            "start_stop_name": _stop_text(stop_seq, "first", "common_name", str(field(journey_row, "start_stop_name", ""))),
+            "end_stop_name": _stop_text(stop_seq, "last", "common_name", str(field(journey_row, "end_stop_name", ""))),
             "schedule_day": int(day),
             "original_distance_km": float(distance_km),
             "original_start_h": float(start_h),

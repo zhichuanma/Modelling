@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import warnings
 from typing import Any, Iterable
 
 import pandas as pd
@@ -153,6 +154,23 @@ def _attach_parking(
     trips = sorted(schedule.trips, key=lambda trip: (trip.departure_time, trip.arrival_time, trip.trip_id))
     schedule.trips = trips
     schedule.parking_events = []
+    metadata = getattr(schedule, "metadata", {})
+    overlaps = [
+        (left.trip_id, right.trip_id, left.arrival_time, right.departure_time)
+        for left, right in zip(trips[:-1], trips[1:])
+        if right.departure_time < left.arrival_time
+    ]
+    metadata["n_trip_overlaps"] = int(len(overlaps))
+    schedule.metadata = metadata
+    if overlaps:
+        suffix = "..." if len(overlaps) > 3 else ""
+        warnings.warn(
+            f"Trip overlap on aggregated day: {overlaps[:3]}{suffix}. "
+            "Day-1 tail of a cross-midnight block collided with the next "
+            "service day; layovers in the overlap window are dropped.",
+            UserWarning,
+            stacklevel=2,
+        )
     if not trips:
         event = _parking_event(
             0.0,
@@ -232,6 +250,9 @@ def block_to_year_schedules(
     schedule_ev_id = ev_id or f"bus_{block_id}"
     metadata = _block_metadata(block_df)
     active_set = {_coerce_date(value) for value in active_dates}
+    # TODO: Inactive-day schedules look reusable, but core.simulator mutates
+    # ParkingEvent SOC/energy fields in place, so singleton reuse would leak
+    # state across dates until the simulator becomes read-only.
     schedules_by_date = {
         date_value: DailySchedule(
             ev_id=schedule_ev_id,

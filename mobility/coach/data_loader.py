@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .distance import vehicle_journey_distance_km
+from .distance import build_coords_lookup, vehicle_journey_distance_km
 from .stop_geometry import load_unified_stops
 from .txc_parser import (
     build_trip_table_from_xml,
@@ -39,6 +39,7 @@ JOURNEY_REQUIRED_COLUMNS = (
     "duration_h",
     "distance_km",
     "distance_source",
+    "road_detour_factor",
     "has_cross_midnight",
 )
 STOP_SEQUENCE_REQUIRED_COLUMNS = (
@@ -80,6 +81,7 @@ def build_all_coach_tables(
     coach_root = Path(coach_root)
     inventory = pd.read_csv(inventory_path)
     stops = load_unified_stops() if stops_geom is None else stops_geom.copy()
+    coords = build_coords_lookup(stops)
     stop_tables: list[pd.DataFrame] = []
     journey_tables: list[pd.DataFrame] = []
 
@@ -135,10 +137,16 @@ def build_all_coach_tables(
                 stop_group,
                 stops,
                 road_detour_factor=road_detour_factor,
+                coords=coords,
             )
         distance_frame = pd.DataFrame(
             [
-                {"journey_id": journey_id, "distance_km": distance, "distance_source": source}
+                {
+                    "journey_id": journey_id,
+                    "distance_km": distance,
+                    "distance_source": source,
+                    "road_detour_factor": float(road_detour_factor),
+                }
                 for journey_id, (distance, source) in distances.items()
             ]
         )

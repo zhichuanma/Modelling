@@ -1,0 +1,6 @@
+EV_ID,LSOA_code,LAD,Model,count,Energy_kWh,DC_Power_kW,AC_Power_kW,EV_ID_in_row,vehicle_subtype,allocation_method,legacy_bus_combined,efficiency_wh_per_km,efficiency_source,energy_kWh_per_100km
+coach_1,E01000001,E09000001,YUTONG TC12,3,281.0,150.0,22.0,1,coach,fixture,True,810.0,fixture,81.0
+coach_2,E01000002,E09000001,YUTONG GTE14,5,563.0,150.0,22.0,1,coach,fixture,True,1166.0,fixture,116.6
+coach_3,E01000003,E09000001,YUTONG TC9,1,,150.0,22.0,1,coach,fixture,True,810.0,fixture,81.0
+coach_4,E01000004,E09000001,YUTONG TC12,1,281.0,150.0,22.0,1,coach,fixture,True,,fixture,
+bus_1,E01000005,E09000001,YUTONG E12,2,422.0,150.0,22.0,1,bus,fixture,True,910.0,fixture,91.0

@@ -46,5 +46,7 @@ def test_data_loader_builds_and_reads_parquet(tmp_path) -> None:
 
     assert len(loaded_journeys) == 2
     assert loaded_journeys["distance_km"].notna().all()
+    assert set(loaded_journeys["distance_source"]) == {"haversine_x_detour"}
+    assert (loaded_journeys["road_detour_factor"] == 1.30).all()
     assert loaded_stops["journey_id"].nunique() == 2
     assert quality.loc[0, "known_distance_journeys"] == 2
