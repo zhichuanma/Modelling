@@ -36,3 +36,27 @@ def test_cross_midnight_block_returns_two_schedules_and_conserves_energy() -> No
 
     energy_kwh = sum(trip.energy_consumed_kwh for schedule in schedules for trip in schedule.trips)
     assert energy_kwh == pytest.approx((12.0 + 18.0) * 1.2, abs=1e-6)
+
+
+def test_zero_duration_rows_are_dropped_before_schedule_assembly() -> None:
+    block = pd.DataFrame(
+        [
+            ("bad", "OP", "R1", "S1", 0, "B1", "native", 8.0, 8.0, 5.0, "A", "B", 51.0, -1.0, 51.05, -1.05, "shape_bad"),
+            ("good", "OP", "R1", "S1", 0, "B1", "native", 9.0, 10.0, 12.0, "B", "C", 51.05, -1.05, 51.1, -1.1, "shape_good"),
+        ],
+        columns=[
+            "trip_id", "agency_id", "route_id", "service_id", "direction_id", "block_id",
+            "block_source", "start_h", "end_h", "distance_km", "start_stop", "end_stop",
+            "start_lat", "start_lon", "end_lat", "end_lon", "shape_id",
+        ],
+    )
+
+    with pytest.warns(UserWarning, match="Dropping 1 non-positive-duration bus trips"):
+        schedules = block_to_daily_schedules(
+            block,
+            "bus_B1",
+            consumption_kwh_per_km=1.0,
+            depot_charge_kw=100.0,
+        )
+
+    assert [trip.trip_id for trip in schedules[0].trips] == ["good__d0"]

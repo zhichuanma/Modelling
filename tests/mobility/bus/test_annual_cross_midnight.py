@@ -9,9 +9,11 @@ from mobility.bus.year_schedule import block_to_year_schedules
 
 
 def _cross_midnight_block() -> pd.DataFrame:
+    # End of "day" matches start of "tail" exactly so deadhead injection is a
+    # no-op; the test is dedicated to cross-midnight schedule splitting only.
     return pd.DataFrame(
         [
-            ("tail", "OP", "R1", "S1", 0, "B1", "native", 23.0, 25.0, 40.0, "A", "B", 51.0, -1.0, 51.1, -1.1, "shape"),
+            ("tail", "OP", "R1", "S1", 0, "B1", "native", 23.0, 25.0, 40.0, "C", "D", 51.2, -1.2, 51.3, -1.3, "shape"),
             ("day", "OP", "R1", "S1", 0, "B1", "native", 8.0, 9.0, 20.0, "B", "C", 51.1, -1.1, 51.2, -1.2, "shape"),
         ],
         columns=[

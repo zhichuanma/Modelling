@@ -7,7 +7,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from mobility.core.spatial import DEFAULT_ONSPD_PATH, load_lsoa_centroids, nearest_lsoa_for_points
+from mobility.core.spatial import (
+    DEFAULT_ONSPD_PATH,
+    load_lsoa_boundary_index,
+    load_lsoa_centroids,
+    nearest_lsoa_for_points,
+    query_lsoa_polygons,
+)
 
 
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "outputs" / "all_blocks.parquet"
@@ -113,39 +119,138 @@ def attach_lsoa(
     *,
     onspd_path: Path | None = None,
     centroids: pd.DataFrame | None = None,
+    boundary_index: dict | None = None,
+    boundary_paths: tuple | None = None,
     max_distance_km: float | None = 5.0,
 ) -> pd.DataFrame:
-    """Spatially join bus trip endpoints to nearest LSOA-21 centroid codes."""
+    """Spatially join bus trip endpoints to LSOA/Data Zone codes."""
     required_columns = ("start_lat", "start_lon", "end_lat", "end_lon")
     missing = [col for col in required_columns if col not in blocks.columns]
     if missing:
         raise ValueError(f"blocks is missing required coordinate columns: {missing}")
 
     source_path = DEFAULT_ONSPD_PATH if onspd_path is None else Path(onspd_path)
-    centroid_frame = load_lsoa_centroids(source_path) if centroids is None else centroids.copy()
-
     out = blocks.copy()
-    start_lsoa, start_distance_km = nearest_lsoa_for_points(
-        out["start_lat"].to_numpy(dtype=float),
-        out["start_lon"].to_numpy(dtype=float),
-        centroid_frame,
-        max_distance_km=max_distance_km,
-    )
-    end_lsoa, end_distance_km = nearest_lsoa_for_points(
-        out["end_lat"].to_numpy(dtype=float),
-        out["end_lon"].to_numpy(dtype=float),
-        centroid_frame,
-        max_distance_km=max_distance_km,
-    )
+    start_lat = out["start_lat"].to_numpy(dtype=float)
+    start_lon = out["start_lon"].to_numpy(dtype=float)
+    end_lat = out["end_lat"].to_numpy(dtype=float)
+    end_lon = out["end_lon"].to_numpy(dtype=float)
+    all_lat = np.concatenate([start_lat, end_lat])
+    all_lon = np.concatenate([start_lon, end_lon])
+    valid = np.isfinite(all_lat) & np.isfinite(all_lon)
+
+    all_codes = np.full(all_lat.shape[0], "", dtype=object)
+    all_sources = np.full(all_lat.shape[0], "no_match", dtype=object)
+    all_methods = np.full(all_lat.shape[0], "no_match", dtype=object)
+    all_distances = np.full(all_lat.shape[0], np.nan, dtype=float)
+
+    if valid.any():
+        coord_frame = (
+            pd.DataFrame({"lat": all_lat[valid], "lon": all_lon[valid]})
+            .drop_duplicates(ignore_index=True)
+        )
+        unique_lat = coord_frame["lat"].to_numpy(dtype=float)
+        unique_lon = coord_frame["lon"].to_numpy(dtype=float)
+
+        use_polygon = boundary_index is not None or boundary_paths is not None or centroids is None
+        if use_polygon:
+            polygon_index = (
+                load_lsoa_boundary_index(boundary_paths)
+                if boundary_index is None and boundary_paths is not None
+                else boundary_index
+            )
+            if polygon_index is None:
+                polygon_index = load_lsoa_boundary_index()
+            unique_codes, unique_sources, unique_methods = query_lsoa_polygons(
+                unique_lat,
+                unique_lon,
+                polygon_index,
+            )
+        else:
+            unique_codes = np.full(unique_lat.shape[0], "", dtype=object)
+            unique_sources = np.full(unique_lat.shape[0], "no_match", dtype=object)
+            unique_methods = np.full(unique_lat.shape[0], "no_match", dtype=object)
+
+        unique_distances = np.full(unique_lat.shape[0], np.nan, dtype=float)
+        fallback_mask = unique_methods == "no_match"
+        if fallback_mask.any():
+            try:
+                centroid_frame = load_lsoa_centroids(source_path) if centroids is None else centroids.copy()
+                fallback_codes, fallback_distances = nearest_lsoa_for_points(
+                    unique_lat[fallback_mask],
+                    unique_lon[fallback_mask],
+                    centroid_frame,
+                    max_distance_km=max_distance_km,
+                )
+            except (FileNotFoundError, KeyError, ValueError, pd.errors.EmptyDataError):
+                fallback_codes = np.full(int(fallback_mask.sum()), "", dtype=object)
+                fallback_distances = np.full(int(fallback_mask.sum()), np.nan, dtype=float)
+            target = np.flatnonzero(fallback_mask)
+            if fallback_codes.size:
+                unique_codes[target] = fallback_codes
+                unique_distances[target] = fallback_distances
+                matched = fallback_codes != ""
+                unique_sources[target[matched]] = "centroid_fallback"
+                unique_methods[target[matched]] = "centroid_fallback"
+        unique_distances[unique_methods == "polygon"] = 0.0
+
+        mapping = {
+            (float(lat), float(lon)): (code, source, method, distance)
+            for lat, lon, code, source, method, distance in zip(
+                unique_lat,
+                unique_lon,
+                unique_codes,
+                unique_sources,
+                unique_methods,
+                unique_distances,
+            )
+        }
+        valid_positions = np.flatnonzero(valid)
+        for pos in valid_positions:
+            code, source, method, distance = mapping[(float(all_lat[pos]), float(all_lon[pos]))]
+            all_codes[pos] = code
+            all_sources[pos] = source
+            all_methods[pos] = method
+            all_distances[pos] = distance
+
+    split = len(out)
+    start_lsoa = all_codes[:split]
+    end_lsoa = all_codes[split:]
+    start_distance_km = all_distances[:split]
+    end_distance_km = all_distances[split:]
 
     out["start_lsoa"] = start_lsoa
     out["end_lsoa"] = end_lsoa
+    out["start_lsoa_source"] = all_sources[:split]
+    out["start_lsoa_match_method"] = all_methods[:split]
+    out["end_lsoa_source"] = all_sources[split:]
+    out["end_lsoa_match_method"] = all_methods[split:]
     out["start_lsoa_distance_km"] = start_distance_km
     out["end_lsoa_distance_km"] = end_distance_km
+    valid_methods = all_methods[valid]
+    valid_sources = all_sources[valid]
+    denominator = int(valid_methods.shape[0])
+
+    def method_pct(method: str) -> float:
+        return _pct(int((valid_methods == method).sum()), denominator)
+
+    source_names = ("EW_LSOA21", "Scotland_DZ2022", "NI_DZ2021", "centroid_fallback", "no_match")
+    source_breakdown = {
+        name: _pct(int((valid_sources == name).sum()), denominator)
+        for name in source_names
+    }
+    fallback_distances = all_distances[valid & (all_methods == "centroid_fallback")]
     out.attrs["lsoa_join"] = {
         "onspd_path": str(source_path) if centroids is None else str(onspd_path or ""),
         "max_distance_km": None if max_distance_km is None else float(max_distance_km),
         "n_unmatched": int(((out["start_lsoa"] == "") | (out["end_lsoa"] == "")).sum()),
+        "method": "polygon_with_centroid_fallback",
+        "valid_coordinate_assignments": denominator,
+        "polygon_pct": method_pct("polygon"),
+        "centroid_fallback_pct": method_pct("centroid_fallback"),
+        "no_match_pct": method_pct("no_match"),
+        "max_centroid_fallback_km": float(np.nanmax(fallback_distances)) if fallback_distances.size else np.nan,
+        "source_breakdown": source_breakdown,
     }
     return out
 

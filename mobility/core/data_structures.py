@@ -48,6 +48,8 @@ class Trip:
     destination_lsoa: str = ""
     distance_km_nts: float = 0.0
     fallback_distance: bool = False
+    is_deadhead: bool = False
+    deadhead_class: str = ""
 
 
 @dataclass

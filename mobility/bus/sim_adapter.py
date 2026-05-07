@@ -8,6 +8,7 @@ import pandas as pd
 from mobility.core.constants import DEFAULT_CHEMISTRY, STEP_HOURS_DECISION, STEPS_PER_DAY_DECISION
 from mobility.core.simulator import simulate_single_ev
 
+from .feasibility import scan_block_infeasibility
 from .trip_chain_bus import block_to_daily_schedules
 from .vehicle_sampling import sample_bus_vehicle_specs
 
@@ -26,6 +27,19 @@ def _parking_energy_kwh(schedules, purpose: str) -> float:
             if event.location_purpose == purpose
         )
     )
+
+
+def _deadhead_audit_fields(schedules) -> dict:
+    metadata = getattr(schedules[0], "metadata", {}) if schedules else {}
+    return {
+        "deadhead_short_count": int(metadata.get("deadhead_short_count", 0)),
+        "deadhead_long_count": int(metadata.get("deadhead_long_count", 0)),
+        "deadhead_total_km": float(metadata.get("deadhead_total_km", 0.0)),
+        "deadhead_total_kwh": float(metadata.get("deadhead_total_kwh", 0.0)),
+        "deadhead_skipped_time_count": int(metadata.get("deadhead_skipped_time_count", 0)),
+        "deadhead_skipped_time_km": float(metadata.get("deadhead_skipped_time_km", 0.0)),
+        "deadhead_skipped_missing_coord_count": int(metadata.get("deadhead_skipped_missing_coord_count", 0)),
+    }
 
 
 def simulate_block(
@@ -64,6 +78,16 @@ def simulate_block(
     energy_charged_kwh = float(np.sum(load_kw) * STEP_HOURS_DECISION)
     depot_kwh = _parking_energy_kwh(schedules, "depot_terminus")
     layover_kwh = _parking_energy_kwh(schedules, "layover")
+    feasibility = scan_block_infeasibility(
+        soc,
+        schedules,
+        battery_kwh,
+        soc_init=soc_init,
+        depot_charge_kw=depot_charge_kw,
+        layover_charge_kw=layover_charge_kw,
+        allow_layover_charging=allow_layover_charging,
+    )
+    deadhead_audit = _deadhead_audit_fields(schedules)
 
     return {
         "schedules": schedules,
@@ -79,6 +103,12 @@ def simulate_block(
         "battery_kwh": float(battery_kwh),
         "consumption_kwh_per_km": float(consumption_kwh_per_km),
         "depot_charge_kw": float(depot_charge_kw),
+        "infeasible": bool(feasibility["infeasible"]),
+        "first_floor_hit_h": feasibility["first_floor_hit_h"],
+        "first_floor_trip_id": feasibility["first_floor_trip_id"],
+        "shortfall_kwh": float(feasibility["shortfall_kwh"]),
+        "infeasibility_reason": feasibility["infeasibility_reason"],
+        **deadhead_audit,
     }
 
 
@@ -148,31 +178,76 @@ def simulate_fleet_blocks(
             if vehicle_spec is not None
             else float(depot_charge_kw)
         )
-        result = simulate_block(
-            block_df,
-            battery_kwh=block_battery_kwh,
-            consumption_kwh_per_km=block_consumption_kwh_per_km,
-            depot_charge_kw=block_depot_charge_kw,
-            **kwargs,
-        )
-        fleet_load_kw = _add_load(fleet_load_kw, result["load_kw"])
-        record = {
-            "block_id": block_id,
-            "agency_id": block_df["agency_id"].iloc[0],
-            "block_source": block_df["block_source"].iloc[0],
-            "n_trips": int(len(block_df)),
-            "n_schedule_days": int(len(result["schedules"])),
-            "total_km": result["total_km"],
-            "total_consumed_kwh": result["total_consumed_kwh"],
-            "energy_charged_kwh": result["energy_charged_kwh"],
-            "depot_kwh": result["depot_kwh"],
-            "layover_kwh": result["layover_kwh"],
-            "soc_end": result["soc_end"],
-            "soc_min": result["soc_min"],
-            "battery_kwh": block_battery_kwh,
-            "consumption_kwh_per_km": block_consumption_kwh_per_km,
-            "depot_charge_kw": block_depot_charge_kw,
-        }
+        try:
+            result = simulate_block(
+                block_df,
+                battery_kwh=block_battery_kwh,
+                consumption_kwh_per_km=block_consumption_kwh_per_km,
+                depot_charge_kw=block_depot_charge_kw,
+                **kwargs,
+            )
+            fleet_load_kw = _add_load(fleet_load_kw, result["load_kw"])
+            record = {
+                "block_id": block_id,
+                "agency_id": block_df["agency_id"].iloc[0],
+                "block_source": block_df["block_source"].iloc[0],
+                "n_trips": int(len(block_df)),
+                "n_schedule_days": int(len(result["schedules"])),
+                "total_km": result["total_km"],
+                "total_consumed_kwh": result["total_consumed_kwh"],
+                "energy_charged_kwh": result["energy_charged_kwh"],
+                "depot_kwh": result["depot_kwh"],
+                "layover_kwh": result["layover_kwh"],
+                "soc_end": result["soc_end"],
+                "soc_min": result["soc_min"],
+                "battery_kwh": block_battery_kwh,
+                "consumption_kwh_per_km": block_consumption_kwh_per_km,
+                "depot_charge_kw": block_depot_charge_kw,
+                "infeasible": result["infeasible"],
+                "first_floor_hit_h": result["first_floor_hit_h"],
+                "first_floor_trip_id": result["first_floor_trip_id"],
+                "shortfall_kwh": result["shortfall_kwh"],
+                "infeasibility_reason": result["infeasibility_reason"],
+                "deadhead_short_count": result["deadhead_short_count"],
+                "deadhead_long_count": result["deadhead_long_count"],
+                "deadhead_total_km": result["deadhead_total_km"],
+                "deadhead_total_kwh": result["deadhead_total_kwh"],
+                "deadhead_skipped_time_count": result["deadhead_skipped_time_count"],
+                "deadhead_skipped_time_km": result["deadhead_skipped_time_km"],
+                "deadhead_skipped_missing_coord_count": result["deadhead_skipped_missing_coord_count"],
+                "simulation_error": "",
+            }
+        except Exception as exc:
+            record = {
+                "block_id": block_id,
+                "agency_id": block_df["agency_id"].iloc[0],
+                "block_source": block_df["block_source"].iloc[0],
+                "n_trips": int(len(block_df)),
+                "n_schedule_days": 0,
+                "total_km": float(block_df["distance_km"].sum()) if "distance_km" in block_df else np.nan,
+                "total_consumed_kwh": np.nan,
+                "energy_charged_kwh": np.nan,
+                "depot_kwh": np.nan,
+                "layover_kwh": np.nan,
+                "soc_end": np.nan,
+                "soc_min": np.nan,
+                "battery_kwh": block_battery_kwh,
+                "consumption_kwh_per_km": block_consumption_kwh_per_km,
+                "depot_charge_kw": block_depot_charge_kw,
+                "infeasible": True,
+                "first_floor_hit_h": np.nan,
+                "first_floor_trip_id": "",
+                "shortfall_kwh": np.nan,
+                "infeasibility_reason": "simulation_error",
+                "deadhead_short_count": 0,
+                "deadhead_long_count": 0,
+                "deadhead_total_km": 0.0,
+                "deadhead_total_kwh": 0.0,
+                "deadhead_skipped_time_count": 0,
+                "deadhead_skipped_time_km": 0.0,
+                "deadhead_skipped_missing_coord_count": 0,
+                "simulation_error": str(exc),
+            }
         if vehicle_spec is not None:
             record.update(
                 {

@@ -14,8 +14,27 @@ from mobility.core.constants import DEFAULT_CHEMISTRY, STEP_HOURS_DECISION, STEP
 from mobility.core.simulator import simulate_single_ev
 
 from .calendar import FEED_YEAR_END, FEED_YEAR_START
+from .feasibility import scan_block_infeasibility
 from .vehicle_sampling import sample_bus_vehicle_specs
 from .year_schedule import block_to_year_schedules
+
+
+_DEADHEAD_AUDIT_KEYS = (
+    ("deadhead_short_count", int, 0),
+    ("deadhead_long_count", int, 0),
+    ("deadhead_total_km", float, 0.0),
+    ("deadhead_total_kwh", float, 0.0),
+    ("deadhead_skipped_time_count", int, 0),
+    ("deadhead_skipped_time_km", float, 0.0),
+    ("deadhead_skipped_missing_coord_count", int, 0),
+)
+
+
+def _aggregate_deadhead_audit(schedules) -> dict[str, Any]:
+    return {
+        key: cast(sum(getattr(schedule, "metadata", {}).get(key, default) for schedule in schedules))
+        for key, cast, default in _DEADHEAD_AUDIT_KEYS
+    }
 
 
 DEFAULT_PER_BLOCK_PATH = Path(__file__).resolve().parents[2] / "outputs" / "bus_annual_per_block.parquet"
@@ -161,6 +180,16 @@ def simulate_block_year(
     trip_distance_km = float(sum(trip.distance_km for schedule in schedules for trip in schedule.trips))
     trip_energy_kwh = float(sum(trip.energy_consumed_kwh for schedule in schedules for trip in schedule.trips))
     energy_charged_kwh = float(np.sum(load_kw) * STEP_HOURS_DECISION)
+    feasibility = scan_block_infeasibility(
+        soc,
+        schedules,
+        battery_kwh,
+        soc_init=soc_init,
+        depot_charge_kw=depot_charge_kw,
+        layover_charge_kw=layover_charge_kw,
+        allow_layover_charging=allow_layover_charging,
+    )
+    deadhead_audit = _aggregate_deadhead_audit(schedules)
     result = {
         "schedules": schedules,
         "soc_after_warmup": float(soc_after_warmup),
@@ -180,6 +209,12 @@ def simulate_block_year(
         "battery_kwh": battery_kwh,
         "consumption_kwh_per_km": consumption_kwh_per_km,
         "depot_charge_kw": depot_charge_kw,
+        "infeasible": bool(feasibility["infeasible"]),
+        "first_floor_hit_h": feasibility["first_floor_hit_h"],
+        "first_floor_trip_id": feasibility["first_floor_trip_id"],
+        "shortfall_kwh": float(feasibility["shortfall_kwh"]),
+        "infeasibility_reason": feasibility["infeasibility_reason"],
+        **deadhead_audit,
     }
     if keep_soc:
         result["soc"] = soc
@@ -258,40 +293,89 @@ def simulate_fleet_year(
                 stacklevel=2,
             )
             active_dates = ()
-        result = simulate_block_year(
-            block_df,
-            active_dates,
-            vehicle_spec,
-            start_date=start_date,
-            end_date=end_date,
-            soc_init=soc_init,
-            warm_up_days=warm_up_days,
-            keep_soc=False,
-            keep_load_matrix=True,
-            **block_kwargs,
-        )
-        fleet_load_kw += result["load_matrix_kw"]
-        record = {
-            "block_id": block_id,
-            "agency_id": block_df["agency_id"].iloc[0],
-            "service_id": service_id,
-            "block_source": block_df["block_source"].iloc[0],
-            "n_trips_template": int(len(block_df)),
-            "active_days": result["active_days"],
-            "n_active_dates": result["n_active_dates"],
-            "n_schedule_days": result["n_schedule_days"],
-            "n_overlap_warnings": result["n_overlap_warnings"],
-            "annual_distance_km": result["annual_distance_km"],
-            "annual_energy_kwh": result["annual_energy_kwh"],
-            "energy_charged_kwh": result["energy_charged_kwh"],
-            "depot_kwh": result["depot_kwh"],
-            "layover_kwh": result["layover_kwh"],
-            "soc_end": result["soc_end"],
-            "soc_min": result["soc_min"],
-            "battery_kwh": result["battery_kwh"],
-            "consumption_kwh_per_km": result["consumption_kwh_per_km"],
-            "depot_charge_kw": result["depot_charge_kw"],
-        }
+        try:
+            result = simulate_block_year(
+                block_df,
+                active_dates,
+                vehicle_spec,
+                start_date=start_date,
+                end_date=end_date,
+                soc_init=soc_init,
+                warm_up_days=warm_up_days,
+                keep_soc=False,
+                keep_load_matrix=True,
+                **block_kwargs,
+            )
+            fleet_load_kw += result["load_matrix_kw"]
+            record = {
+                "block_id": block_id,
+                "agency_id": block_df["agency_id"].iloc[0],
+                "service_id": service_id,
+                "block_source": block_df["block_source"].iloc[0],
+                "n_trips_template": int(len(block_df)),
+                "active_days": result["active_days"],
+                "n_active_dates": result["n_active_dates"],
+                "n_schedule_days": result["n_schedule_days"],
+                "n_overlap_warnings": result["n_overlap_warnings"],
+                "annual_distance_km": result["annual_distance_km"],
+                "annual_energy_kwh": result["annual_energy_kwh"],
+                "energy_charged_kwh": result["energy_charged_kwh"],
+                "depot_kwh": result["depot_kwh"],
+                "layover_kwh": result["layover_kwh"],
+                "soc_end": result["soc_end"],
+                "soc_min": result["soc_min"],
+                "battery_kwh": result["battery_kwh"],
+                "consumption_kwh_per_km": result["consumption_kwh_per_km"],
+                "depot_charge_kw": result["depot_charge_kw"],
+                "infeasible": result["infeasible"],
+                "first_floor_hit_h": result["first_floor_hit_h"],
+                "first_floor_trip_id": result["first_floor_trip_id"],
+                "shortfall_kwh": result["shortfall_kwh"],
+                "infeasibility_reason": result["infeasibility_reason"],
+                "deadhead_short_count": result["deadhead_short_count"],
+                "deadhead_long_count": result["deadhead_long_count"],
+                "deadhead_total_km": result["deadhead_total_km"],
+                "deadhead_total_kwh": result["deadhead_total_kwh"],
+                "deadhead_skipped_time_count": result["deadhead_skipped_time_count"],
+                "deadhead_skipped_time_km": result["deadhead_skipped_time_km"],
+                "deadhead_skipped_missing_coord_count": result["deadhead_skipped_missing_coord_count"],
+                "simulation_error": "",
+            }
+        except Exception as exc:
+            record = {
+                "block_id": block_id,
+                "agency_id": block_df["agency_id"].iloc[0],
+                "service_id": service_id,
+                "block_source": block_df["block_source"].iloc[0],
+                "n_trips_template": int(len(block_df)),
+                "active_days": int(len(set(active_dates))),
+                "n_active_dates": int(len(set(active_dates))),
+                "n_schedule_days": len(dates),
+                "n_overlap_warnings": 0,
+                "annual_distance_km": 0.0,
+                "annual_energy_kwh": 0.0,
+                "energy_charged_kwh": 0.0,
+                "depot_kwh": 0.0,
+                "layover_kwh": 0.0,
+                "soc_end": np.nan,
+                "soc_min": np.nan,
+                "battery_kwh": float(_spec_value(vehicle_spec, "battery_kwh")),
+                "consumption_kwh_per_km": float(_spec_value(vehicle_spec, "consumption_kwh_per_km")),
+                "depot_charge_kw": float(_spec_value(vehicle_spec, "depot_charge_kw")),
+                "infeasible": True,
+                "first_floor_hit_h": np.nan,
+                "first_floor_trip_id": "",
+                "shortfall_kwh": np.nan,
+                "infeasibility_reason": "simulation_error",
+                "deadhead_short_count": 0,
+                "deadhead_long_count": 0,
+                "deadhead_total_km": 0.0,
+                "deadhead_total_kwh": 0.0,
+                "deadhead_skipped_time_count": 0,
+                "deadhead_skipped_time_km": 0.0,
+                "deadhead_skipped_missing_coord_count": 0,
+                "simulation_error": str(exc),
+            }
         if vehicle_params is not None:
             record.update(
                 {
