@@ -31,6 +31,8 @@ cells.append(
 cells.append(
     code(
         """
+        import importlib
+        import inspect
         import sys
         import time
         from pathlib import Path
@@ -47,10 +49,27 @@ cells.append(
             REPO_ROOT = Path.cwd().parent
         sys.path.insert(0, str(REPO_ROOT))
 
+        expected_mobility_dir = (REPO_ROOT / "mobility").resolve()
+        loaded_mobility = sys.modules.get("mobility")
+        if loaded_mobility is not None:
+            loaded_file_raw = getattr(loaded_mobility, "__file__", None)
+            loaded_file = Path(loaded_file_raw).resolve() if loaded_file_raw else None
+            if loaded_file is None or loaded_file.parent != expected_mobility_dir:
+                for module_name in list(sys.modules):
+                    if module_name == "mobility" or module_name.startswith("mobility."):
+                        del sys.modules[module_name]
+
+        import mobility.bus as _bus_module
+        import mobility.bus.annual_simulation as _annual_simulation
+
+        importlib.reload(_annual_simulation)
+        importlib.reload(_bus_module)
+
         from mobility.core.simulator import STEP_HOURS, STEPS_PER_DAY
         from mobility.bus import (
             FEED_YEAR_END,
             FEED_YEAR_START,
+            attach_lsoa,
             build_service_date_index,
             load_all_blocks,
             load_bus_vehicle_params,
@@ -60,6 +79,13 @@ cells.append(
             simulate_fleet_year,
             write_annual_results,
         )
+
+        if "warm_up_days" not in inspect.signature(simulate_block_year).parameters:
+            raise RuntimeError(
+                "simulate_block_year was imported without warm_up_days support. "
+                "Restart the kernel and rerun the setup cell; loaded function: "
+                f"{simulate_block_year}"
+            )
 
         BLOCKS_PATH = REPO_ROOT / "outputs" / "all_blocks.parquet"
         VEHICLE_PARAMS_PATH = REPO_ROOT.parent / "Data" / "EV" / "EV_prepared" / "BEV_Bus_Coach_unique_with_params_with_AC.csv"
@@ -80,7 +106,7 @@ cells.append(md("## A. Feed-Year Calendar"))
 cells.append(
     code(
         """
-        all_blocks = load_all_blocks(BLOCKS_PATH)
+        all_blocks = attach_lsoa(load_all_blocks(BLOCKS_PATH))
         service_calendar = load_service_calendar()
         service_date_index = build_service_date_index(
             all_blocks["service_id"].astype(str).unique(),

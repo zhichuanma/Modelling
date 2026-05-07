@@ -47,7 +47,7 @@ cells.append(
             REPO_ROOT = Path.cwd().parent
         sys.path.insert(0, str(REPO_ROOT))
 
-        from mobility.core import DailySchedule, ParkingEvent, simulate_single_day
+        from mobility.core import DailySchedule, ParkingEvent, Trip, simulate_single_day
         from mobility.core.constants import CV_THRESHOLD, DEFAULT_CHEMISTRY
         from mobility.core.simulator import STEP_HOURS, STEPS_PER_DAY
         from mobility.bus.data_loader import attach_lsoa, load_all_blocks, summarize_block_quality
@@ -57,10 +57,11 @@ cells.append(
             sample_protagonist_block,
         )
         from mobility.bus.trip_chain_bus import block_to_daily_schedules
-        from mobility.bus.sim_adapter import simulate_block
+        from mobility.bus.sim_adapter import simulate_block, simulate_fleet_blocks
         from mobility.bus.vehicle_sampling import load_bus_vehicle_params, sample_bus_vehicle_specs
 
         BLOCKS_PATH = REPO_ROOT / "outputs" / "all_blocks.parquet"
+        AUDIT_PATH = REPO_ROOT / "outputs" / "bus_feasibility_audit.parquet"
         VEHICLE_PARAMS_PATH = REPO_ROOT.parent / "Data" / "EV" / "EV_prepared" / "BEV_Bus_Coach_unique_with_params_with_AC.csv"
         MAIN_BUS_SEED = 20260430
         ALT_BUS_SEED = MAIN_BUS_SEED + 1
@@ -135,6 +136,270 @@ cells.append(
     )
 )
 
+cells.append(
+    md(
+        """
+        ## 0.5 One-step-at-a-time physics
+
+        Stage 0 runs `simulate_single_day` as a black box. This stage opens it.
+
+        The simulator works on a 96-step / 15-minute decision grid. Three
+        mechanics decide every SOC trace:
+
+        1. **Trip energy is spread across overlapping steps**, not deposited at
+           the trip's start. A 30-minute trip starting at 8:05 contributes to
+           steps 32 (08:00-08:15) and 33 (08:15-08:30) in proportion to overlap.
+        2. **Charging follows a CC-CV approximation**. Below the CV threshold
+           (default 0.80) the simulator draws full power; above it, power
+           tapers linearly to zero at SOC=1.0.
+        3. **SOC clamps to zero on infeasibility**. If a step's discharge
+           drives SOC below zero, the simulator silently dams it at zero and
+           keeps going. The `load_kw` you see afterwards is wrong, but no
+           exception is raised. (`mobility.coach.feasibility` exists exactly
+           to wall this off upstream.)
+
+        Stage 0.5 builds three minimum-viable schedules to make each mechanic
+        visible.
+        """
+    )
+)
+
+cells.append(md("### 0.5a Trip energy and parking power on the 15-minute grid"))
+
+cells.append(
+    code(
+        """
+        from mobility.core.simulator import _STEP_STARTS, _STEP_ENDS
+
+        demo_trip = Trip(
+            trip_id="demo",
+            departure_time=8.0833,
+            arrival_time=8.5833,
+            distance_km=10.0,
+            origin_purpose="bus_stop",
+            destination_purpose="bus_stop",
+            energy_consumed_kwh=10.0 * 1.2,
+        )
+        demo_park = ParkingEvent(
+            start_time=9.0,
+            end_time=10.5,
+            duration_hours=1.5,
+            location_purpose="depot_terminus",
+            can_charge=True,
+            charge_power_kw=80.0,
+        )
+        demo_schedule = DailySchedule(
+            ev_id="demo_grid",
+            day=0,
+            day_type="representative_service_day",
+            trips=[demo_trip],
+            parking_events=[demo_park],
+        )
+
+        trip_overlap_h = np.maximum(
+            0.0,
+            np.minimum(_STEP_ENDS, demo_trip.arrival_time)
+            - np.maximum(_STEP_STARTS, demo_trip.departure_time),
+        )
+        rate_per_hour = demo_trip.energy_consumed_kwh / (
+            demo_trip.arrival_time - demo_trip.departure_time
+        )
+        trip_energy_per_step = trip_overlap_h * rate_per_hour
+
+        park_overlap_h = np.maximum(
+            0.0,
+            np.minimum(_STEP_ENDS, demo_park.end_time)
+            - np.maximum(_STEP_STARTS, demo_park.start_time),
+        )
+        park_power_per_step = demo_park.charge_power_kw * (park_overlap_h / STEP_HOURS)
+
+        demo_soc, demo_load_kw, _ = simulate_single_day(
+            demo_schedule,
+            battery_capacity_kwh=300.0,
+            soc_start=0.50,
+        )
+        hours = np.arange(STEPS_PER_DAY) * STEP_HOURS
+
+        fig, axes = plt.subplots(1, 3, figsize=(13, 3.6), sharex=True)
+        axes[0].bar(hours, trip_energy_per_step, width=STEP_HOURS, align="edge", color="tab:red", alpha=0.85)
+        axes[0].set(title="trip_energy_per_step (kWh)", xlabel="Hour", ylabel="kWh per step")
+        axes[0].set_xlim(7.5, 11.0)
+        axes[0].grid(alpha=0.25)
+
+        axes[1].bar(hours, park_power_per_step, width=STEP_HOURS, align="edge", color="tab:blue", alpha=0.85)
+        axes[1].axhline(demo_park.charge_power_kw, color="0.4", ls="--", lw=1, label="rated 80 kW")
+        axes[1].set(title="park_power_per_step (kW)", xlabel="Hour")
+        axes[1].set_xlim(7.5, 11.0)
+        axes[1].legend(loc="upper right")
+        axes[1].grid(alpha=0.25)
+
+        ax_soc = axes[2]
+        ax_load = ax_soc.twinx()
+        ax_soc.plot(hours, demo_soc, color="tab:green", lw=2, label="SOC")
+        ax_load.step(hours, demo_load_kw, where="post", color="tab:blue", alpha=0.55, label="load_kw")
+        ax_soc.set(title="SOC + actual load_kw", xlabel="Hour", ylabel="SOC", ylim=(0.0, 1.0))
+        ax_load.set_ylabel("kW (avg over step)")
+        ax_soc.set_xlim(7.5, 11.0)
+        ax_soc.grid(alpha=0.25)
+        plt.tight_layout()
+        plt.show()
+
+        grid_audit = pd.DataFrame(
+            [
+                ("trip duration_h", demo_trip.arrival_time - demo_trip.departure_time),
+                ("rate_per_hour kWh/h", rate_per_hour),
+                ("sum trip_energy_per_step", float(trip_energy_per_step.sum())),
+                ("trip energy_consumed_kwh", demo_trip.energy_consumed_kwh),
+                ("steps with trip_energy > 0", int((trip_energy_per_step > 0).sum())),
+                ("max park_power_per_step (kW)", float(park_power_per_step.max())),
+                ("rated charge_power_kw", demo_park.charge_power_kw),
+            ],
+            columns=["metric", "value"],
+        )
+        display(grid_audit)
+        """
+    )
+)
+
+cells.append(md("### 0.5b CC-CV charge taper in isolation"))
+
+cells.append(
+    code(
+        """
+        from mobility.core.simulator import _soc_walk
+
+        cv_threshold = CV_THRESHOLD[DEFAULT_CHEMISTRY]
+        battery_kwh = 300.0
+        rated_kw = 100.0
+        n_steps = STEPS_PER_DAY
+
+        trip_zero = np.zeros(n_steps, dtype=float)
+        park_full = np.full(n_steps, rated_kw, dtype=float)
+        soc_out = np.zeros(n_steps, dtype=float)
+        load_out = np.zeros(n_steps, dtype=float)
+
+        _soc_walk(
+            trip_zero,
+            park_full,
+            battery_kwh,
+            0.0,
+            soc_out,
+            load_out,
+            cv_threshold,
+        )
+        hours = np.arange(n_steps) * STEP_HOURS
+
+        soc_grid = np.linspace(0.0, 1.0, 200)
+        analytic_factor = np.where(soc_grid < cv_threshold, 1.0, (1.0 - soc_grid) / (1.0 - cv_threshold))
+
+        fig, axes = plt.subplots(1, 2, figsize=(13, 3.8))
+
+        ax = axes[0]
+        ax.plot(soc_grid, analytic_factor * rated_kw, color="tab:blue", lw=2, label="analytic CC-CV envelope")
+        ax.scatter(soc_out, load_out, color="tab:orange", s=14, alpha=0.7, label="simulator-emitted load_kw")
+        ax.axvline(cv_threshold, color="0.4", ls="--", lw=1, label=f"CV threshold = {cv_threshold:.2f}")
+        ax.set(xlabel="SOC", ylabel="Effective charging power (kW)", title=f"CC-CV taper ({rated_kw:.0f} kW rated, {battery_kwh:.0f} kWh)")
+        ax.set_xlim(0, 1)
+        ax.grid(alpha=0.25)
+        ax.legend(loc="lower left")
+
+        ax = axes[1]
+        ax_load = ax.twinx()
+        ax.plot(hours, soc_out, color="tab:green", lw=2, label="SOC")
+        ax_load.step(hours, load_out, where="post", color="tab:blue", alpha=0.55, label="load_kw")
+        ax.axhline(cv_threshold, color="0.4", ls="--", lw=1, label="CV threshold")
+        ax.set(xlabel="Hour", ylabel="SOC", title="Same charge in time: full power until CV, then taper", ylim=(0, 1.02))
+        ax_load.set_ylabel("kW (avg over step)")
+        ax.set_xlim(0, 8)
+        ax.grid(alpha=0.25)
+        plt.tight_layout()
+        plt.show()
+
+        cv_summary = pd.DataFrame(
+            [
+                ("cv_threshold", cv_threshold),
+                ("rated_kw", rated_kw),
+                ("battery_kwh", battery_kwh),
+                ("hours to reach SOC=cv_threshold", float(np.argmax(soc_out >= cv_threshold) * STEP_HOURS)),
+                ("hours to reach SOC>=0.99", float(np.argmax(soc_out >= 0.99) * STEP_HOURS) if (soc_out >= 0.99).any() else float("nan")),
+                ("load_kw at SOC=0.95 (approx)", float(load_out[np.searchsorted(soc_out, 0.95)]) if (soc_out >= 0.95).any() else float("nan")),
+            ],
+            columns=["metric", "value"],
+        )
+        display(cv_summary)
+        """
+    )
+)
+
+cells.append(md("### 0.5c Silent SOC-floor clamp on an infeasible day"))
+
+cells.append(
+    code(
+        """
+        infeasible_trip = Trip(
+            trip_id="too_long",
+            departure_time=8.0,
+            arrival_time=14.0,
+            distance_km=200.0,
+            origin_purpose="bus_stop",
+            destination_purpose="bus_stop",
+            energy_consumed_kwh=200.0 * 1.2,
+        )
+        infeasible_schedule = DailySchedule(
+            ev_id="demo_infeasible",
+            day=0,
+            day_type="representative_service_day",
+            trips=[infeasible_trip],
+            parking_events=[
+                ParkingEvent(0.0, 8.0, 8.0, "depot_terminus", can_charge=True, charge_power_kw=0.0),
+                ParkingEvent(14.0, 24.0, 10.0, "depot_terminus", can_charge=True, charge_power_kw=50.0),
+            ],
+        )
+        small_battery_kwh = 50.0
+        consumption_kwh_per_km = 1.2
+        usable_kwh = small_battery_kwh
+        required_kwh = infeasible_trip.distance_km * consumption_kwh_per_km
+
+        bad_soc, bad_load_kw, bad_soc_end = simulate_single_day(
+            infeasible_schedule,
+            battery_capacity_kwh=small_battery_kwh,
+            soc_start=1.0,
+        )
+        hours = np.arange(STEPS_PER_DAY) * STEP_HOURS
+        first_floor_step = int(np.argmax(bad_soc <= 1e-9)) if (bad_soc <= 1e-9).any() else -1
+
+        fig, ax = plt.subplots(figsize=(12, 3.8))
+        ax_load = ax.twinx()
+        ax.plot(hours, bad_soc, color="tab:green", lw=2, label="SOC (clamped to 0)")
+        ax_load.step(hours, bad_load_kw, where="post", color="tab:blue", alpha=0.55, label="load_kw")
+        if first_floor_step >= 0:
+            ax.axvline(first_floor_step * STEP_HOURS, color="tab:red", ls="--", lw=1.2, label="first SOC floor hit")
+        ax.set(xlabel="Hour", ylabel="SOC", ylim=(-0.03, 1.05), title="200 km trip on a 50 kWh battery -> SOC silently clamped to 0")
+        ax_load.set_ylabel("kW (avg over step)")
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        ax.grid(alpha=0.25)
+        ax.legend(loc="upper right")
+        plt.tight_layout()
+        plt.show()
+
+        clamp_audit = pd.DataFrame(
+            [
+                ("battery_kwh", small_battery_kwh),
+                ("required_kwh (distance x consumption)", required_kwh),
+                ("usable_kwh (no safety margin)", usable_kwh),
+                ("shortfall_kwh", max(0.0, required_kwh - usable_kwh)),
+                ("first_floor_hit_h", float(first_floor_step * STEP_HOURS) if first_floor_step >= 0 else float("nan")),
+                ("simulator soc_end (do not trust)", float(bad_soc_end)),
+                ("simulator total_charged_kwh", float(bad_load_kw.sum() * STEP_HOURS)),
+            ],
+            columns=["metric", "value"],
+        )
+        display(clamp_audit)
+        """
+    )
+)
+
 cells.append(md("## A. What `all_blocks.parquet` is"))
 
 cells.append(
@@ -149,9 +414,14 @@ cells.append(
         matched_end = all_blocks["end_lsoa"].ne("")
         lsoa_qc = pd.DataFrame(
             [
+                ("join_method", lsoa_join.get("method", "centroid_fallback")),
                 ("max_distance_km", lsoa_join["max_distance_km"]),
                 ("n_unmatched_rows", lsoa_join["n_unmatched"]),
                 ("pct_rows_unmatched", 100.0 * lsoa_join["n_unmatched"] / max(len(all_blocks), 1)),
+                ("polygon_pct", lsoa_join.get("polygon_pct", np.nan)),
+                ("centroid_fallback_pct", lsoa_join.get("centroid_fallback_pct", np.nan)),
+                ("no_match_pct", lsoa_join.get("no_match_pct", np.nan)),
+                ("source_breakdown", lsoa_join.get("source_breakdown", {})),
                 ("start_distance_km_median", all_blocks.loc[matched_start, "start_lsoa_distance_km"].median()),
                 ("start_distance_km_p99", all_blocks.loc[matched_start, "start_lsoa_distance_km"].quantile(0.99)),
                 ("end_distance_km_median", all_blocks.loc[matched_end, "end_lsoa_distance_km"].median()),
@@ -191,7 +461,7 @@ cells.append(
         """
         ## A.1. Trip endpoint LSOAs
 
-        The block table now carries nearest LSOA-21 labels on trip start and end points. The join is event-level: trips get origin and destination LSOAs, layovers inherit the previous trip's destination LSOA, and first/last depot dwell uses the surrounding trip endpoint.
+        LSOA/Data Zone assignment now uses polygon-with-centroid-fallback: points inside EW LSOA21 / Scotland DZ2022 / NI DZ2021 polygons use polygon match; offshore or unmatched points fall back to the legacy nearest-centroid method. The join is event-level: trips get origin and destination small-area codes, layovers inherit the previous trip's destination, and first/last depot dwell uses the surrounding trip endpoint.
         """
     )
 )
@@ -460,6 +730,131 @@ cells.append(
         fig.colorbar(im, ax=ax, label="soc_min")
         plt.tight_layout()
         plt.show()
+        """
+    )
+)
+
+cells.append(md("## I. Fleet feasibility and deadhead audit"))
+
+cells.append(
+    code(
+        """
+        if AUDIT_PATH.exists():
+            audit = pd.read_parquet(AUDIT_PATH)
+            audit_scope = "full fleet audit loaded from outputs/bus_feasibility_audit.parquet"
+        else:
+            audit_scope = "deterministic sample audit, not full fleet"
+            block_catalog = all_blocks.groupby("block_id", sort=False)["block_source"].first().reset_index()
+            sample_ids = (
+                block_catalog.groupby("block_source", group_keys=False)
+                .apply(lambda frame: frame.sample(n=min(20, len(frame)), random_state=MAIN_BUS_SEED))
+                ["block_id"]
+                .tolist()
+            )
+            audit_blocks = all_blocks[all_blocks["block_id"].isin(sample_ids)].copy()
+            audit, _audit_load = simulate_fleet_blocks(
+                audit_blocks,
+                battery_kwh=BUS_BATTERY_KWH,
+                consumption_kwh_per_km=BUS_CONSUMPTION_KWH_PER_KM,
+                depot_charge_kw=DEPOT_CHARGE_KW,
+                allow_layover_charging=False,
+            )
+            audit = audit.reset_index()
+
+        block_lookup = all_blocks.groupby("block_id", sort=False).agg(
+            route_id=("route_id", lambda values: ",".join(sorted({str(v) for v in values})[:3])),
+            agency_id=("agency_id", "first"),
+            block_source=("block_source", "first"),
+            service_total_km=("distance_km", "sum"),
+        ).reset_index()
+        audit = audit.merge(block_lookup, on="block_id", how="left", suffixes=("", "_blocks"))
+        if "agency_id_blocks" in audit:
+            audit["agency_id"] = audit["agency_id"].fillna(audit["agency_id_blocks"])
+        if "block_source_blocks" in audit:
+            audit["block_source"] = audit["block_source"].fillna(audit["block_source_blocks"])
+        audit["deadhead_share"] = audit["deadhead_total_km"] / audit["total_km"].replace(0.0, np.nan)
+
+        summary = pd.DataFrame(
+            [
+                ("scope", audit_scope),
+                ("total_blocks", int(len(audit))),
+                ("infeasible_blocks", int(audit["infeasible"].fillna(False).sum())),
+                ("infeasible_pct", float(audit["infeasible"].fillna(False).mean() * 100.0) if len(audit) else np.nan),
+                ("deadhead_total_km", float(audit["deadhead_total_km"].sum())),
+                ("deadhead_skipped_time_km", float(audit["deadhead_skipped_time_km"].sum())),
+                ("long_deadhead_blocks", int((audit["deadhead_long_count"] > 0).sum())),
+            ],
+            columns=["metric", "value"],
+        )
+        display(summary)
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        reason_counts = audit["infeasibility_reason"].fillna("feasible").value_counts()
+        axes[0, 0].bar(reason_counts.index.astype(str), reason_counts.values, color="tab:red", alpha=0.75)
+        axes[0, 0].set_title("Feasibility reason")
+        axes[0, 0].tick_params(axis="x", rotation=35)
+        floor_h = pd.to_numeric(audit["first_floor_hit_h"], errors="coerce").dropna()
+        axes[0, 1].hist(floor_h, bins=np.arange(0, 25, 1), color="tab:purple", alpha=0.75)
+        axes[0, 1].set_title("First SOC floor hit hour")
+        axes[0, 1].set_xlabel("Hour")
+        axes[1, 0].hist(audit["deadhead_share"].dropna(), bins=30, color="tab:blue", alpha=0.75)
+        axes[1, 0].set_title("Deadhead km / total km")
+        long_by_source = audit.groupby("block_source")["deadhead_long_count"].apply(lambda s: float((s > 0).mean() * 100.0))
+        axes[1, 1].bar(long_by_source.index.astype(str), long_by_source.values, color="0.35", alpha=0.8)
+        axes[1, 1].set_title("Blocks with long deadhead by source (%)")
+        for ax in axes.ravel():
+            ax.grid(alpha=0.22)
+        plt.tight_layout()
+        plt.show()
+
+        reason_agency = pd.crosstab(
+            audit["infeasibility_reason"].fillna("feasible"),
+            audit["agency_id"].astype(str),
+        )
+        if not reason_agency.empty:
+            fig, ax = plt.subplots(figsize=(min(12, 2 + 0.5 * reason_agency.shape[1]), 4.5))
+            im = ax.imshow(reason_agency.values, aspect="auto", cmap="Reds")
+            ax.set_yticks(range(reason_agency.shape[0]), reason_agency.index)
+            ax.set_xticks(range(reason_agency.shape[1]), reason_agency.columns, rotation=45, ha="right")
+            ax.set_title("Infeasibility reason x agency_id")
+            fig.colorbar(im, ax=ax, label="blocks")
+            plt.tight_layout()
+            plt.show()
+
+        route_rank = audit.groupby(["agency_id", "route_id"], dropna=False).agg(
+            blocks=("block_id", "count"),
+            infeasible=("infeasible", "sum"),
+            deadhead_km=("deadhead_total_km", "sum"),
+        )
+        route_rank["infeasible_share"] = route_rank["infeasible"] / route_rank["blocks"].clip(lower=1)
+        display(route_rank.sort_values(["infeasible", "infeasible_share"], ascending=False).head(5))
+
+        spec_rows = []
+        for label, battery_kwh, consumption_kwh_per_km in [
+            ("sampled default", BUS_BATTERY_KWH, BUS_CONSUMPTION_KWH_PER_KM),
+            ("BYD EBUS 345 kWh", 345.0, BUS_CONSUMPTION_KWH_PER_KM),
+            ("small battery 180 kWh", 180.0, BUS_CONSUMPTION_KWH_PER_KM),
+        ]:
+            result = simulate_block(
+                protagonist_block,
+                battery_kwh=battery_kwh,
+                consumption_kwh_per_km=consumption_kwh_per_km,
+                depot_charge_kw=DEPOT_CHARGE_KW,
+                allow_layover_charging=False,
+            )
+            spec_rows.append(
+                {
+                    "spec": label,
+                    "battery_kwh": battery_kwh,
+                    "soc_min": result["soc_min"],
+                    "infeasible": result["infeasible"],
+                    "shortfall_kwh": result["shortfall_kwh"],
+                    "reason": result["infeasibility_reason"],
+                    "deadhead_total_km": result["deadhead_total_km"],
+                    "deadhead_skipped_time_km": result["deadhead_skipped_time_km"],
+                }
+            )
+        display(pd.DataFrame(spec_rows))
         """
     )
 )
