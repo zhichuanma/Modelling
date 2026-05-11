@@ -53,6 +53,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--chunk-size", type=int, default=100)
     parser.add_argument(
+        "--vehicle-shard-index",
+        type=int,
+        default=None,
+        help=(
+            "Run only this deterministic round-robin vehicle shard. "
+            "Use with --vehicle-shard-count; indexes are zero-based."
+        ),
+    )
+    parser.add_argument(
+        "--vehicle-shard-count",
+        type=int,
+        default=None,
+        help="Total deterministic round-robin vehicle shards for parallel full-fleet runs.",
+    )
+    parser.add_argument(
         "--destination-cache-mode",
         choices=["origin", "key"],
         default="origin",
@@ -175,6 +190,8 @@ def main() -> None:
         destination_cache_mode=args.destination_cache_mode,
         year=args.year,
         max_vehicles=args.max_vehicles,
+        vehicle_shard_index=args.vehicle_shard_index,
+        vehicle_shard_count=args.vehicle_shard_count,
         chunk_size=args.chunk_size,
         main_seed=args.main_seed,
         warmup_seed=args.warmup_seed,

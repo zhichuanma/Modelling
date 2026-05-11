@@ -59,9 +59,12 @@ class CurveRunMetrics:
     study_year: int
     timezone: str = "not_specified_in_existing_model"
     private_vehicle_count_available: int = 0
+    private_vehicle_count_before_shard: int = 0
     private_vehicle_count_run: int = 0
     failed_vehicle_count: int = 0
     vehicle_limit: int | None = None
+    vehicle_shard_index: int | None = None
+    vehicle_shard_count: int | None = None
     chunk_size: int = 0
     station_metadata_count: int = 0
     station_metadata_missing_name_count: int = 0
@@ -89,6 +92,10 @@ class CurveRunMetrics:
     @property
     def is_sample(self) -> bool:
         return self.vehicle_limit is not None
+
+    @property
+    def is_shard(self) -> bool:
+        return self.vehicle_shard_index is not None and self.vehicle_shard_count is not None
 
 
 class LazyDestinationSampler:
@@ -575,6 +582,64 @@ def _normalise_holiday_region(value: object) -> str:
 def _chunk_frame(frame: pd.DataFrame, chunk_size: int) -> Iterable[pd.DataFrame]:
     for start in range(0, len(frame), chunk_size):
         yield frame.iloc[start : start + chunk_size].copy()
+
+
+def _normalise_vehicle_shard(
+    vehicle_shard_index: int | None,
+    vehicle_shard_count: int | None,
+) -> tuple[int | None, int | None]:
+    """Validate optional round-robin vehicle shard arguments."""
+
+    if vehicle_shard_index is None and vehicle_shard_count is None:
+        return None, None
+    if vehicle_shard_index is None or vehicle_shard_count is None:
+        raise ValueError("vehicle_shard_index and vehicle_shard_count must be supplied together")
+
+    shard_index = int(vehicle_shard_index)
+    shard_count = int(vehicle_shard_count)
+    if shard_count <= 0:
+        raise ValueError("vehicle_shard_count must be positive")
+    if shard_index < 0 or shard_index >= shard_count:
+        raise ValueError("vehicle_shard_index must satisfy 0 <= index < vehicle_shard_count")
+    return shard_index, shard_count
+
+
+def _apply_vehicle_shard(
+    person_fleet: pd.DataFrame,
+    ev_fleet: pd.DataFrame,
+    *,
+    vehicle_shard_index: int | None,
+    vehicle_shard_count: int | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Select one deterministic round-robin vehicle shard and align EV rows."""
+
+    shard_index, shard_count = _normalise_vehicle_shard(vehicle_shard_index, vehicle_shard_count)
+    before_count = int(len(person_fleet))
+    if shard_index is None or shard_count is None:
+        return person_fleet.copy(), ev_fleet.copy(), {
+            "vehicle_count_before_shard": before_count,
+            "vehicle_count_after_shard": before_count,
+            "vehicle_shard_index": None,
+            "vehicle_shard_count": None,
+        }
+
+    positions = np.arange(before_count)
+    selected_positions = positions[positions % shard_count == shard_index]
+    person_shard = person_fleet.iloc[selected_positions].copy()
+
+    run_ev_ids = person_shard["ev_id"].astype(str).tolist()
+    if run_ev_ids:
+        ev_shard = ev_fleet.loc[ev_fleet["EV_ID"].astype(str).isin(run_ev_ids)].copy()
+        ev_shard = ev_shard.set_index("EV_ID", drop=False).loc[run_ev_ids].reset_index(drop=True)
+    else:
+        ev_shard = ev_fleet.head(0).copy()
+
+    return person_shard, ev_shard, {
+        "vehicle_count_before_shard": before_count,
+        "vehicle_count_after_shard": int(len(person_shard)),
+        "vehicle_shard_index": shard_index,
+        "vehicle_shard_count": shard_count,
+    }
 
 
 def _home_lsoa_map(ev_fleet: pd.DataFrame) -> dict[str, str]:
@@ -2210,9 +2275,12 @@ def write_data_quality_report(
         f"- queue_model: `{QUEUE_MODEL}`",
             f"- timezone: `{metrics.timezone}`",
             f"- private vehicles available: `{metrics.private_vehicle_count_available}`",
+            f"- private vehicles before shard: `{metrics.private_vehicle_count_before_shard}`",
             f"- private vehicles processed in this run: `{metrics.private_vehicle_count_run}`",
             f"- failed vehicles: `{metrics.failed_vehicle_count}`",
             f"- sample run: `{_markdown_bool(metrics.is_sample)}`",
+            f"- vehicle shard: `{metrics.vehicle_shard_index if metrics.is_shard else 'none'}` / `{metrics.vehicle_shard_count if metrics.is_shard else 'none'}`",
+            f"- partial shard run: `{_markdown_bool(metrics.is_shard)}`",
         "",
         "## Inventory Summary",
         "",
@@ -2339,6 +2407,8 @@ def run_privatecar_station_curve_pipeline(
     destination_cache_mode: str = "origin",
     year: int = 2025,
     max_vehicles: int | None = None,
+    vehicle_shard_index: int | None = None,
+    vehicle_shard_count: int | None = None,
     chunk_size: int = 100,
     main_seed: int = MAIN_CAR_SEED,
     warmup_seed: int = ALT_CAR_SEED,
@@ -2359,6 +2429,10 @@ def run_privatecar_station_curve_pipeline(
     out.mkdir(parents=True, exist_ok=True)
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
+    vehicle_shard_index, vehicle_shard_count = _normalise_vehicle_shard(
+        vehicle_shard_index,
+        vehicle_shard_count,
+    )
     profile_rows: list[dict] = []
     vehicle_schedule_profile_rows: list[dict] = []
     run_start_perf = time.perf_counter()
@@ -2387,6 +2461,7 @@ def run_privatecar_station_curve_pipeline(
         data_path,
         max_vehicles=max_vehicles,
     )
+    private_meta["private_vehicle_count_before_shard"] = int(len(person_fleet))
     _record_profile(
         profile_rows,
         run_start_perf=run_start_perf,
@@ -2398,6 +2473,23 @@ def run_privatecar_station_curve_pipeline(
             "max_vehicles": max_vehicles,
         },
     )
+    if vehicle_shard_count is not None:
+        phase_start = time.perf_counter()
+        person_fleet, ev_fleet, shard_meta = _apply_vehicle_shard(
+            person_fleet,
+            ev_fleet,
+            vehicle_shard_index=vehicle_shard_index,
+            vehicle_shard_count=vehicle_shard_count,
+        )
+        private_meta.update(shard_meta)
+        _record_profile(
+            profile_rows,
+            run_start_perf=run_start_perf,
+            phase_start_perf=phase_start,
+            phase="apply_vehicle_shard",
+            vehicle_count=int(len(person_fleet)),
+            details=shard_meta,
+        )
 
     phase_start = time.perf_counter()
     library_df_raw = pd.read_parquet(data_path / "person_week_library.parquet")
@@ -2504,9 +2596,14 @@ def run_privatecar_station_curve_pipeline(
     metrics = CurveRunMetrics(
         study_year=year,
         private_vehicle_count_available=int(private_meta["private_vehicle_count_available"]),
+        private_vehicle_count_before_shard=int(
+            private_meta.get("private_vehicle_count_before_shard", private_meta["private_vehicle_count_run"])
+        ),
         private_vehicle_count_run=int(len(person_fleet)),
         failed_vehicle_count=len(failed_vehicle_rows),
         vehicle_limit=max_vehicles,
+        vehicle_shard_index=vehicle_shard_index,
+        vehicle_shard_count=vehicle_shard_count,
         chunk_size=chunk_size,
         station_metadata_count=int(len(station_metadata)),
         station_metadata_missing_name_count=int(station_metadata["station_name"].isna().sum()),
@@ -2830,6 +2927,12 @@ def run_privatecar_station_curve_pipeline(
     if metrics.is_sample:
         metrics.notes.append(
             f"This run used --max-vehicles={max_vehicles}; outputs are a smoke/sample export, not the full private-car fleet."
+        )
+    if metrics.is_shard:
+        metrics.notes.append(
+            "This run used "
+            f"--vehicle-shard-index={vehicle_shard_index} --vehicle-shard-count={vehicle_shard_count}; "
+            "merge all shards before treating outputs as the full private-car fleet."
         )
     if failed_vehicle_rows:
         metrics.notes.append(

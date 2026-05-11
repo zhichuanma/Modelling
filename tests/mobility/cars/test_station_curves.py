@@ -8,8 +8,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from mobility.cars.station_curves import (
+    _apply_vehicle_shard,
+    _normalise_vehicle_shard,
     aggregate_station_curves_15min,
     build_privatecar_person_week_integrity_report,
     build_session_time_bins_for_ev,
@@ -19,6 +22,49 @@ from mobility.cars.station_curves import (
 )
 from mobility.core.data_structures import DailySchedule, ParkingEvent
 from mobility.core.simulator import STEP_HOURS, STEPS_PER_DAY
+
+
+def test_vehicle_shard_selects_round_robin_rows_and_aligns_ev_fleet() -> None:
+    person_fleet = pd.DataFrame(
+        {
+            "ev_id": [f"cars_{idx}" for idx in range(10)],
+            "person_id": [f"person_{idx}" for idx in range(10)],
+        }
+    )
+    ev_fleet = pd.DataFrame(
+        {
+            "EV_ID": [f"cars_{idx}" for idx in reversed(range(10))],
+            "home_lsoa": [f"E{idx:08d}" for idx in reversed(range(10))],
+        }
+    )
+
+    person_shard, ev_shard, metadata = _apply_vehicle_shard(
+        person_fleet,
+        ev_fleet,
+        vehicle_shard_index=1,
+        vehicle_shard_count=3,
+    )
+
+    assert person_shard["ev_id"].tolist() == ["cars_1", "cars_4", "cars_7"]
+    assert ev_shard["EV_ID"].tolist() == ["cars_1", "cars_4", "cars_7"]
+    assert metadata == {
+        "vehicle_count_before_shard": 10,
+        "vehicle_count_after_shard": 3,
+        "vehicle_shard_index": 1,
+        "vehicle_shard_count": 3,
+    }
+
+
+def test_vehicle_shard_arguments_must_be_complete_and_in_range() -> None:
+    assert _normalise_vehicle_shard(None, None) == (None, None)
+    assert _normalise_vehicle_shard(0, 2) == (0, 2)
+
+    with pytest.raises(ValueError, match="supplied together"):
+        _normalise_vehicle_shard(0, None)
+    with pytest.raises(ValueError, match="positive"):
+        _normalise_vehicle_shard(0, 0)
+    with pytest.raises(ValueError, match="0 <= index"):
+        _normalise_vehicle_shard(2, 2)
 
 
 def test_station_bin_mapping_splits_public_session_to_15min_steps() -> None:
