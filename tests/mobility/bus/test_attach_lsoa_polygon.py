@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from mobility.bus.data_loader import attach_lsoa
+from mobility.core.spatial import load_lsoa_boundary_index, query_lsoa_polygons
 
 
 def _write_geojson(path: Path, code_col: str, code: str, coords: list[list[float]]) -> None:
@@ -100,3 +101,20 @@ def test_attach_lsoa_keeps_no_match_when_centroid_fallback_empty(boundary_paths:
     assert attached.loc[0, "start_lsoa"] == ""
     assert attached.loc[0, "start_lsoa_match_method"] == "no_match"
     assert attached.attrs["lsoa_join"]["no_match_pct"] > 0.0
+
+
+def test_boundary_loader_uses_first_existing_candidate(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.geojson"
+    scot = tmp_path / "scot.geojson"
+    _write_geojson(scot, "dzcode", "S01000001", [[-3.2, 55.9], [-3.1, 55.9], [-3.1, 56.0], [-3.2, 56.0], [-3.2, 55.9]])
+
+    index = load_lsoa_boundary_index((((missing, scot), "dzcode", "Scotland_DZ2022"),))
+    codes, sources, methods = query_lsoa_polygons(
+        pd.Series([55.95]).to_numpy(dtype=float),
+        pd.Series([-3.15]).to_numpy(dtype=float),
+        index,
+    )
+
+    assert codes.tolist() == ["S01000001"]
+    assert sources.tolist() == ["Scotland_DZ2022"]
+    assert methods.tolist() == ["polygon"]

@@ -18,8 +18,18 @@ import pandas as pd
 MODELLING_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = MODELLING_ROOT.parent
 DATA_LOADS = PROJECT_ROOT / "Data" / "Loads"
+DATA_CHARGING = PROJECT_ROOT / "Data" / "Charging_stations"
 DEFAULT_ONSPD_PATH = (
     PROJECT_ROOT / "Data" / "Units" / "ONSPD_MAY_2025_UK.csv"
+)
+SCOTLAND_DZ_GEOJSON_PATHS = (
+    DATA_LOADS / "SG_DataZone_Bdry_2022.geojson",
+    DATA_LOADS / "SG_DataZoneBdry_2022" / "SG_DataZone_Bdry_2022.geojson",
+    DATA_CHARGING / "SG_DataZoneBdry_2022" / "SG_DataZone_Bdry_2022.geojson",
+)
+SCOTLAND_DZ_SHAPEFILE_PATHS = (
+    DATA_LOADS / "SG_DataZoneBdry_2022" / "SG_DataZone_Bdry_2022.shp",
+    DATA_CHARGING / "SG_DataZoneBdry_2022" / "SG_DataZone_Bdry_2022.shp",
 )
 LSOA_BOUNDARY_PATHS = (
     (
@@ -28,7 +38,7 @@ LSOA_BOUNDARY_PATHS = (
         "EW_LSOA21",
     ),
     (
-        DATA_LOADS / "SG_DataZone_Bdry_2022.geojson",
+        SCOTLAND_DZ_GEOJSON_PATHS,
         "dzcode",
         "Scotland_DZ2022",
     ),
@@ -216,39 +226,10 @@ def _nearest_with_projected_kdtree(
     lon: np.ndarray,
     centroids: pd.DataFrame,
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    try:
-        from pyproj import Transformer
-        from scipy.spatial import cKDTree
-    except ImportError:
-        return None
-
-    transformer = Transformer.from_crs(4326, 27700, always_xy=True)
-    if {"lat", "lon"}.issubset(centroids.columns):
-        centroid_lon = centroids["lon"].to_numpy(dtype=float)
-        centroid_lat = centroids["lat"].to_numpy(dtype=float)
-        centroid_easting_m, centroid_northing_m = transformer.transform(centroid_lon, centroid_lat)
-        projected_centroids = np.column_stack([centroid_easting_m, centroid_northing_m])
-        declared_centroids = centroids[["easting_m", "northing_m"]].to_numpy(dtype=float)
-        if (
-            not np.isfinite(projected_centroids).all()
-            or not np.isfinite(declared_centroids).all()
-            or np.nanmax(np.linalg.norm(projected_centroids - declared_centroids, axis=1)) > 1000.0
-        ):
-            # Small hand-built centroid fixtures can carry approximate or dummy
-            # BNG coordinates; fall back to the lat/lon path instead of
-            # returning distorted nearest-neighbour distances.
-            return None
-
-    point_easting_m, point_northing_m = transformer.transform(lon, lat)
-    points = np.column_stack([point_easting_m, point_northing_m])
-    finite_projected = np.isfinite(points).all(axis=1)
-    if not finite_projected.all():
-        return None
-
-    centroid_xy = centroids[["easting_m", "northing_m"]].to_numpy(dtype=float)
-    tree = cKDTree(centroid_xy)
-    distances_m, nearest_index = tree.query(points, k=1)
-    return nearest_index.astype(int), distances_m.astype(float) / 1000.0
+    # M1 runtime dependencies deliberately exclude projection libraries. Keep
+    # the hook so older callers keep the same control flow, but use the
+    # dependency-free haversine path below.
+    return None
 
 
 def _nearest_with_haversine(
@@ -318,9 +299,9 @@ def load_lsoa_boundary_index(paths: tuple = LSOA_BOUNDARY_PATHS) -> dict:
     polygons: list[list[list[np.ndarray]]] = []
 
     for path_value, code_column, source in paths:
-        path = Path(path_value)
-        if not path.exists():
-            warnings.warn(f"Boundary file missing, skipping {source}: {path}", RuntimeWarning, stacklevel=2)
+        path = _resolve_boundary_path(path_value)
+        if path is None:
+            warnings.warn(_missing_boundary_message(path_value, str(source)), RuntimeWarning, stacklevel=2)
             continue
         data = json.loads(path.read_text())
         features = data.get("features", [])
@@ -356,6 +337,36 @@ def load_lsoa_boundary_index(paths: tuple = LSOA_BOUNDARY_PATHS) -> dict:
         "polygons": polygons,
         "bbox_grid": _build_bbox_grid(bbox_array),
     }
+
+
+def _candidate_paths(path_value) -> tuple[Path, ...]:
+    if isinstance(path_value, (str, Path)):
+        return (Path(path_value),)
+    return tuple(Path(value) for value in path_value)
+
+
+def _resolve_boundary_path(path_value) -> Path | None:
+    for path in _candidate_paths(path_value):
+        if path.is_file():
+            return path
+    return None
+
+
+def _missing_boundary_message(path_value, source: str) -> str:
+    checked = _candidate_paths(path_value)
+    message = f"Boundary GeoJSON missing, skipping {source}: {_format_paths(checked)}"
+    if source == "Scotland_DZ2022":
+        shapefiles = tuple(path for path in SCOTLAND_DZ_SHAPEFILE_PATHS if path.is_file())
+        if shapefiles:
+            message += (
+                f"; found Scotland shapefile(s): {_format_paths(shapefiles)}. "
+                "Convert to EPSG:4326 GeoJSON at one of the checked paths."
+            )
+    return message
+
+
+def _format_paths(paths: Sequence[Path]) -> str:
+    return "; ".join(str(path) for path in paths)
 
 
 def query_lsoa_polygons(

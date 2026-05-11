@@ -205,7 +205,7 @@ def _build_home_lsoa_map(ev_fleet: pd.DataFrame) -> dict[str, str]:
 
 
 def _ensure_centroid_index(centroids: pd.DataFrame) -> pd.DataFrame:
-    result = centroids.copy()
+    result = centroids.copy(deep=False)
     if "lsoa_code" in result.columns:
         result = result.set_index("lsoa_code", drop=True)
     return result.loc[:, ["easting_m", "northing_m"]]

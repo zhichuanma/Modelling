@@ -537,7 +537,7 @@ cells.append(
         station_indices = station_matcher_module._build_lsoa_indices(stations_df)
         layer2_dest_lsoa = None
         for dest_lsoa in shopping_top20["dest_lsoa"].astype(str):
-            pool = station_indices["by_lsoa_label"].get((dest_lsoa, "shopping"))
+            pool = station_indices["by_lsoa"].get(dest_lsoa)
             if pool is not None and len(pool) > 1:
                 layer2_dest_lsoa = dest_lsoa
                 break
@@ -567,7 +567,7 @@ cells.append(
             date_iso="2025-05-06",
         )
         selected_event = layer2_schedule.parking_events[0]
-        pool_rows = station_indices["by_lsoa_label"][(layer2_dest_lsoa, "shopping")]
+        pool_rows = station_indices["by_lsoa"][layer2_dest_lsoa]
         pool_distances_m = np.fromiter(
             (station_matcher_module._distance_m(layer2_dest_lsoa, station_indices["lsoa"][row_idx], centroids_indexed) for row_idx in pool_rows),
             dtype=np.float64,
@@ -596,7 +596,7 @@ cells.append(
 cells.append(
     md(
         """
-        *Caption.* The Layer 1 draw picks the destination LSOA; the Layer 2 draw then works inside that LSOA. In this case the protagonist sees two shopping stations, and the higher-capacity one wins because it combines the same 500 m intra-LSOA distance with a larger log-capacity score.
+        *Caption.* The Layer 1 draw picks the destination LSOA; the Layer 2 draw then works inside that LSOA. In this case the protagonist sees two public station candidates, and the higher-capacity one wins because it combines the same 500 m intra-LSOA distance with a larger log-capacity score.
         """
     )
 )

@@ -272,9 +272,14 @@ def build_library_index(library_df: pd.DataFrame) -> LibraryIndex:
     return library_index
 
 
-def build_leisure_pool_index(library_df: pd.DataFrame) -> LeisurePoolIndex:
+def build_leisure_pool_index(
+    library_df: pd.DataFrame,
+    *,
+    library_index: LibraryIndex | None = None,
+) -> LeisurePoolIndex:
     """Return {person_id: leisure-like chain entries} for holiday transforms."""
-    library_index = build_library_index(library_df)
+    if library_index is None:
+        library_index = build_library_index(library_df)
     leisure_pool_index: LeisurePoolIndex = {}
 
     for person_id, patterns in library_index.items():

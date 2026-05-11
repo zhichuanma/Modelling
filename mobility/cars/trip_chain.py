@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from typing import Dict, List, Optional, Tuple
+import time
+from typing import Callable, Dict, List, Optional, Tuple
 import warnings
 
 import numpy as np
@@ -269,6 +270,9 @@ def assign_year_schedules(
     progress_interval: int = 0,
     region: str = "england",
     apply_seasonal_correction: bool = True,
+    profile_callback: Optional[Callable[[dict], None]] = None,
+    library_index_cache=None,
+    leisure_pool_index_cache=None,
 ) -> Dict[str, List[DailySchedule]]:
     """Assign person-linked weekly patterns across a calendar year.
 
@@ -287,8 +291,12 @@ def assign_year_schedules(
     if n_weeks < 1:
         raise ValueError("n_weeks must be at least 1")
 
-    library_index = build_library_index(library_df)
-    leisure_pool_index = build_leisure_pool_index(library_df)
+    library_index = library_index_cache if library_index_cache is not None else build_library_index(library_df)
+    leisure_pool_index = (
+        leisure_pool_index_cache
+        if leisure_pool_index_cache is not None
+        else build_leisure_pool_index(library_df, library_index=library_index)
+    )
     monday_of_year_1 = _first_monday_of_year(year)
 
     ev_runtime = ev_fleet.copy()
@@ -306,6 +314,7 @@ def assign_year_schedules(
     total = len(fleet_rows)
 
     for i, row in enumerate(fleet_rows.itertuples(index=False), start=1):
+        vehicle_profile_start = time.perf_counter()
         ev_id = str(row.ev_id)
         person_id = str(row.person_id)
         if ev_id not in ev_lookup.index:
@@ -369,6 +378,25 @@ def assign_year_schedules(
 
         _smooth_cross_day_parking(daily_schedules)
         fleet_schedules[ev_id] = daily_schedules
+
+        if profile_callback is not None:
+            profile_callback(
+                {
+                    "year": year,
+                    "region": region,
+                    "vehicle_index": i,
+                    "vehicle_count": total,
+                    "ev_id": ev_id,
+                    "person_id": person_id,
+                    "home_lsoa": home_lsoa,
+                    "schedule_days": len(daily_schedules),
+                    "trip_count": sum(len(schedule.trips) for schedule in daily_schedules),
+                    "parking_event_count": sum(
+                        len(schedule.parking_events) for schedule in daily_schedules
+                    ),
+                    "elapsed_seconds": time.perf_counter() - vehicle_profile_start,
+                }
+            )
 
         if progress_interval > 0 and (i % progress_interval == 0 or i == total):
             print(f"  Assigned year schedules: {i:,}/{total:,} EVs", flush=True)
