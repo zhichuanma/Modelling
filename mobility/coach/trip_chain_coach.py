@@ -1,4 +1,8 @@
-"""Convert one coach vehicle journey into simulator-ready schedules."""
+"""Convert one coach vehicle journey into simulator-ready schedules.
+
+Cross-midnight convention: ``start_h`` must lie in ``[0, 24)``; journeys that
+cross midnight are encoded with ``start_h < 24`` and ``end_h > 24`` (up to 48).
+"""
 
 from __future__ import annotations
 
@@ -45,7 +49,7 @@ def _journey_times(row: Any) -> tuple[float, float]:
         raise ValueError("start_h must be non-negative.")
     if start >= HOURS_PER_DAY:
         raise ValueError(
-            f"start_h={start} must be < 24 (vehicle journeys never start in 'next day' clock)."
+            "start_h must be in [0, 24); cross-midnight journeys are encoded as end_h > 24 with start_h < 24"
         )
     if end > 2.0 * HOURS_PER_DAY:
         raise ValueError(f"end_h={end} exceeds 48h; cross-midnight beyond day1 not supported.")
@@ -71,13 +75,10 @@ def _split_trip(start_h: float, end_h: float) -> list[tuple[int, float, float, f
         share = (abs_end_h - abs_start_h) / total_duration_h
         segments.append((day, local_start_h, local_end_h, share))
 
-    if start_h < HOURS_PER_DAY:
-        day0_end_h = min(end_h, HOURS_PER_DAY)
-        add(0, start_h, day0_end_h, start_h, day0_end_h)
-        if end_h > HOURS_PER_DAY:
-            add(1, 0.0, end_h - HOURS_PER_DAY, HOURS_PER_DAY, end_h)
-    else:
-        add(1, start_h - HOURS_PER_DAY, end_h - HOURS_PER_DAY, start_h, end_h)
+    day0_end_h = min(end_h, HOURS_PER_DAY)
+    add(0, start_h, day0_end_h, start_h, day0_end_h)
+    if end_h > HOURS_PER_DAY:
+        add(1, 0.0, end_h - HOURS_PER_DAY, HOURS_PER_DAY, end_h)
     return segments
 
 

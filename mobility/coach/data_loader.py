@@ -116,7 +116,11 @@ def build_all_coach_tables(
             + pd.to_numeric(trip_table.loc[bad_end & has_runtime, "runtime_min"], errors="coerce") / 60.0
         )
         trip_table["duration_h"] = trip_table["end_h"] - trip_table["start_h"]
-        trip_table["has_cross_midnight"] = (trip_table["start_h"] >= 24.0) | (trip_table["end_h"] > 24.0)
+        start_h_valid = trip_table["start_h"].dropna()
+        assert (start_h_valid < 24.0).all(), (
+            "start_h must be in [0, 24); cross-midnight journeys are encoded as end_h > 24"
+        )
+        trip_table["has_cross_midnight"] = (trip_table["end_h"] > 24.0)
         for col in inventory.columns:
             target = col if col not in trip_table.columns else f"inventory_{col}"
             trip_table[target] = _inventory_value(inventory_row, col)

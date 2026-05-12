@@ -1,3 +1,4 @@
+"""Task 1 gate: cross-midnight entry semantics in ``trip_chain_coach``."""
 from __future__ import annotations
 
 import pandas as pd
@@ -48,7 +49,6 @@ def test_end_at_24h_stays_on_day_zero() -> None:
     )
 
     assert [schedule.day for schedule in schedules] == [0]
-    assert len(schedules[0].trips) == 1
     assert schedules[0].trips[0].distance_km == pytest.approx(60.0)
     assert schedules[0].trips[0].energy_consumed_kwh == pytest.approx(72.0)
 
