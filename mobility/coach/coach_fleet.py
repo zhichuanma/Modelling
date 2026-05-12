@@ -60,11 +60,11 @@ def load_coach_fleet(path: str | Path = COACH_FLEET_PATH) -> pd.DataFrame:
         fleet[column] = pd.to_numeric(fleet[column], errors="coerce")
 
     fleet = fleet.dropna(subset=["Energy_kWh", "efficiency_wh_per_km"])
-    fleet = fleet.loc[fleet["Energy_kWh"].gt(0.0) & fleet["efficiency_wh_per_km"].gt(0.0)].copy()
+    fleet = fleet.loc[fleet["Energy_kWh"].gt(0.0) & fleet["efficiency_wh_per_km"].gt(0.0)]
     if fleet.empty:
         raise ValueError(f"No coach rows with positive Energy_kWh and efficiency_wh_per_km in {path}.")
 
-    fleet["consumption_kwh_per_km"] = fleet["efficiency_wh_per_km"] / 1000.0
+    fleet.loc[:, "consumption_kwh_per_km"] = fleet["efficiency_wh_per_km"] / 1000.0
     fleet.attrs["source_path"] = str(path)
     return fleet[COACH_FLEET_COLUMNS].reset_index(drop=True)
 
@@ -83,16 +83,9 @@ def sample_coach_ev(
     if missing:
         raise ValueError(f"fleet_df is missing required columns: {sorted(missing)}")
 
-    candidates = fleet_df.copy()
-    candidates["Energy_kWh"] = pd.to_numeric(candidates["Energy_kWh"], errors="coerce")
-    candidates["consumption_kwh_per_km"] = pd.to_numeric(
-        candidates["consumption_kwh_per_km"],
-        errors="coerce",
-    )
-    candidates = candidates.loc[
-        candidates["Energy_kWh"].gt(0.0)
-        & candidates["consumption_kwh_per_km"].gt(0.0)
-    ].copy()
+    energy = pd.to_numeric(fleet_df["Energy_kWh"], errors="coerce")
+    consumption = pd.to_numeric(fleet_df["consumption_kwh_per_km"], errors="coerce")
+    candidates = fleet_df.loc[energy.gt(0.0) & consumption.gt(0.0)]
     if candidates.empty:
         raise ValueError("No coach EV rows with positive battery and consumption are available.")
 
