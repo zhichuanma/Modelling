@@ -11,19 +11,29 @@ from ._compat import field as _field
 from .feasibility import journey_feasibility
 
 
-def _runtime_h(data: pd.DataFrame) -> pd.Series:
+RUNTIME_SOURCE_VALUES = (
+    "runtime_h",
+    "duration_h",
+    "runtime_min",
+    "start_end_h_diff",
+    "none",
+)
+
+
+def _runtime_h(data: pd.DataFrame) -> tuple[pd.Series, str]:
     if "runtime_h" in data.columns:
-        return pd.to_numeric(data["runtime_h"], errors="coerce")
+        return pd.to_numeric(data["runtime_h"], errors="coerce"), "runtime_h"
     if "duration_h" in data.columns:
-        return pd.to_numeric(data["duration_h"], errors="coerce")
+        return pd.to_numeric(data["duration_h"], errors="coerce"), "duration_h"
     if "runtime_min" in data.columns:
-        return pd.to_numeric(data["runtime_min"], errors="coerce") / 60.0
+        return pd.to_numeric(data["runtime_min"], errors="coerce") / 60.0, "runtime_min"
     if {"start_h", "end_h"}.issubset(data.columns):
-        return pd.to_numeric(data["end_h"], errors="coerce") - pd.to_numeric(
+        value = pd.to_numeric(data["end_h"], errors="coerce") - pd.to_numeric(
             data["start_h"],
             errors="coerce",
         )
-    return pd.Series(np.nan, index=data.index, dtype=float)
+        return value, "start_end_h_diff"
+    return pd.Series(np.nan, index=data.index, dtype=float), "none"
 
 
 def _filter_journeys(
@@ -52,9 +62,10 @@ def _filter_journeys(
             known_distance &= data["distance_source"].astype(str).ne("unknown")
         mask &= known_distance
 
+    runtimes, runtime_source = _runtime_h(data)
+    data["runtime_source"] = runtime_source
     if runtime_h_range is not None:
         lo, hi = runtime_h_range
-        runtimes = _runtime_h(data)
         mask &= runtimes.ge(float(lo)) & runtimes.le(float(hi))
 
     return data.loc[mask].copy()

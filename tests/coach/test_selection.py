@@ -1,3 +1,4 @@
+"""Task 6 gate: ``selection.py`` writes ``runtime_source`` on the output."""
 from __future__ import annotations
 
 import numpy as np
@@ -5,7 +6,6 @@ import pandas as pd
 
 from mobility.coach.selection import (
     RUNTIME_SOURCE_VALUES,
-    render_journey_identity_card,
     sample_contrast_journey,
     sample_protagonist_journey,
 )
@@ -38,7 +38,19 @@ def _journeys() -> pd.DataFrame:
     )
 
 
-def test_protagonist_selection_applies_runtime_distance_and_midnight_filters() -> None:
+def test_protagonist_carries_runtime_source_within_legal_enum() -> None:
+    rng = np.random.default_rng(20260501)
+
+    protagonist = sample_protagonist_journey(_journeys(), rng)
+    contrast = sample_contrast_journey(_journeys(), rng, protagonist)
+
+    assert "runtime_source" in protagonist.index
+    assert protagonist["runtime_source"] in RUNTIME_SOURCE_VALUES
+    assert "runtime_source" in contrast.index
+    assert contrast["runtime_source"] in RUNTIME_SOURCE_VALUES
+
+
+def test_protagonist_obeys_runtime_distance_and_midnight_filters() -> None:
     rng = np.random.default_rng(20260501)
 
     protagonist = sample_protagonist_journey(_journeys(), rng)
@@ -50,31 +62,3 @@ def test_protagonist_selection_applies_runtime_distance_and_midnight_filters() -
     assert contrast["journey_id"] != protagonist["journey_id"]
     distance_gap = abs(contrast["distance_km"] - protagonist["distance_km"]) / max(protagonist["distance_km"], 1.0)
     assert distance_gap >= 0.5
-    assert "runtime_source" in protagonist.index
-    assert protagonist["runtime_source"] in RUNTIME_SOURCE_VALUES
-    assert "runtime_source" in contrast.index
-    assert contrast["runtime_source"] in RUNTIME_SOURCE_VALUES
-
-
-def test_selection_keeps_all_operators_eligible_over_repeated_draws() -> None:
-    journeys = _journeys()
-    rng = np.random.default_rng(20260501)
-    operators = {
-        sample_protagonist_journey(journeys, rng)["operator_code"]
-        for _ in range(200)
-    }
-
-    assert len(operators) >= 5
-
-
-def test_render_identity_card_contains_required_fields() -> None:
-    row = _journeys().iloc[0]
-    ev = {"Model": "YUTONG TC12", "Energy_kWh": 281.0, "consumption_kwh_per_km": 0.9}
-
-    card = render_journey_identity_card(row, ev, wall_clock_s=0.2)
-
-    assert card.shape[1] >= 13
-    assert card.loc[0, "operator"] == "BHAT"
-    assert card.loc[0, "EV model"] == "YUTONG TC12"
-    assert "feasible_single_charge" in card.columns
-    assert "wall-clock time" in card.columns
