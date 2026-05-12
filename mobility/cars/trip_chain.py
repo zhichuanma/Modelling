@@ -7,6 +7,7 @@ import logging
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 import warnings
+import zlib
 
 import numpy as np
 import pandas as pd
@@ -41,6 +42,13 @@ PURPOSE_TO_STATION_LABEL = {
 # Pre-built tuple form of a chain for fast schedule construction.
 # Each element: (departure, arrival, distance_km, purpose_from, purpose_to)
 ChainTuple = List[Tuple[float, float, float, str, str]]
+
+
+def _stable_vehicle_seed(seed_base: int, *, year: int, region: str, ev_id: str) -> int:
+    """Derive a stable 32-bit per-vehicle seed for shard-invariant schedules."""
+
+    key = f"{int(seed_base)}|{int(year)}|{region}|{ev_id}"
+    return zlib.crc32(key.encode("utf-8")) & 0xFFFFFFFF
 
 
 def build_trip_chain_pools(
@@ -267,6 +275,7 @@ def assign_year_schedules(
     consumption_kwh_per_km_default: float = 0.18,
     jitter_minutes: float = 10.0,
     rng: np.random.Generator,
+    vehicle_seed_base: int | None = None,
     progress_interval: int = 0,
     region: str = "england",
     apply_seasonal_correction: bool = True,
@@ -280,6 +289,10 @@ def assign_year_schedules(
     ``energy_consumed_kwh`` is multiplied by SEASONAL_CONSUMPTION_FACTOR[season]
     where season is derived from ``sched.date.month`` via MONTH_TO_SEASON. Set
     to False to produce outputs bit-identical to the pre-Stage-5 pipeline.
+
+    ``vehicle_seed_base`` can be set to derive one stable RNG stream per
+    ``EV_ID``. This keeps year schedules identical when the same fleet is split
+    into parallel vehicle shards.
     """
     required_person_cols = {"ev_id", "person_id", "nts_household_id", "nts_region"}
     missing_person_cols = sorted(required_person_cols.difference(person_fleet.columns))
@@ -317,6 +330,13 @@ def assign_year_schedules(
         vehicle_profile_start = time.perf_counter()
         ev_id = str(row.ev_id)
         person_id = str(row.person_id)
+        vehicle_rng = (
+            np.random.default_rng(
+                _stable_vehicle_seed(vehicle_seed_base, year=year, region=region, ev_id=ev_id)
+            )
+            if vehicle_seed_base is not None
+            else rng
+        )
         if ev_id not in ev_lookup.index:
             raise KeyError(f"ev_id not found in ev_fleet: {ev_id}")
         if person_id not in library_index:
@@ -339,7 +359,7 @@ def assign_year_schedules(
                 week_start,
                 library_index,
                 leisure_pool_index,
-                rng,
+                vehicle_rng,
                 is_holiday_week=is_holiday_week,
             )
 
@@ -357,7 +377,7 @@ def assign_year_schedules(
                     home_lsoa=home_lsoa,
                     start_lsoa=prev_overnight_lsoa,
                     sampler=sampler,
-                    rng=rng,
+                    rng=vehicle_rng,
                 )
                 sched.date = date_d
                 if apply_seasonal_correction:
