@@ -1,8 +1,14 @@
-"""Coach adapters around the vehicle-agnostic SOC simulator."""
+"""Coach adapters around the vehicle-agnostic SOC simulator.
+
+``soc_init`` and ``pre_journey_dwell_h`` are coupled: when ``soc_init`` is left
+as ``None`` the starting SoC is auto-derived so that ``pre_journey_dwell_h``
+hours of charging at ``terminus_charge_kw`` would refill the battery to full,
+turning the pre-journey dwell into a real charging window.
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -66,7 +72,8 @@ def simulate_coach_journey(
     ev_spec: Any,
     *,
     terminus_charge_kw: float = DEFAULT_TERMINUS_CHARGE_KW,
-    soc_init: float = 1.0,
+    pre_journey_dwell_h: float = 6.0,
+    soc_init: Optional[float] = None,
     safety_margin: float = 0.05,
     chemistry: str = DEFAULT_CHEMISTRY,
 ) -> dict:
@@ -74,6 +81,10 @@ def simulate_coach_journey(
     battery_kwh = _battery_kwh(ev_spec)
     consumption_kwh_per_km = float(field(ev_spec, "consumption_kwh_per_km"))
     distance_km = float(field(journey_row, "distance_km"))
+
+    if soc_init is None:
+        derived = 1.0 - (float(pre_journey_dwell_h) * float(terminus_charge_kw) / battery_kwh)
+        soc_init = max(0.0, min(1.0, derived))
 
     feasibility = journey_feasibility(
         distance_km,
@@ -86,6 +97,7 @@ def simulate_coach_journey(
         stop_seq,
         consumption_kwh_per_km=consumption_kwh_per_km,
         terminus_charge_kw=terminus_charge_kw,
+        pre_journey_dwell_h=pre_journey_dwell_h,
     )
     soc, load_kw, soc_after_warmup = simulate_single_ev(
         schedules,
