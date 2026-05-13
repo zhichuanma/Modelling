@@ -100,3 +100,49 @@ def load_unified_stops(
 
     unified = unified.drop_duplicates("stop_point_ref", keep="last")
     return unified.sort_values("stop_point_ref").reset_index(drop=True).loc[:, OUTPUT_COLUMNS]
+
+
+def attach_lsoa_to_journeys(
+    journeys: pd.DataFrame,
+    *,
+    centroids: pd.DataFrame | None = None,
+    onspd_path: str | Path | None = None,
+    max_distance_km: float | None = 5.0,
+) -> pd.DataFrame:
+    """Attach nearest LSOA centroid codes to coach journey endpoints.
+
+    This is a coach-local, nearest-centroid fallback for annual attribution. It
+    deliberately does not import the bus spatial join or polygon boundary path.
+    """
+    required = ("start_lat", "start_lon", "end_lat", "end_lon")
+    missing = [column for column in required if column not in journeys.columns]
+    if missing:
+        raise ValueError(f"journeys is missing required coordinate columns: {missing}")
+
+    from mobility.core.spatial import load_lsoa_centroids, nearest_lsoa_for_points
+
+    out = journeys.copy()
+    centroid_frame = load_lsoa_centroids(Path(onspd_path) if onspd_path is not None else None) if centroids is None else centroids.copy()
+    start_codes, start_distances = nearest_lsoa_for_points(
+        pd.to_numeric(out["start_lat"], errors="coerce").to_numpy(dtype=float),
+        pd.to_numeric(out["start_lon"], errors="coerce").to_numpy(dtype=float),
+        centroid_frame,
+        max_distance_km=max_distance_km,
+    )
+    end_codes, end_distances = nearest_lsoa_for_points(
+        pd.to_numeric(out["end_lat"], errors="coerce").to_numpy(dtype=float),
+        pd.to_numeric(out["end_lon"], errors="coerce").to_numpy(dtype=float),
+        centroid_frame,
+        max_distance_km=max_distance_km,
+    )
+    out["start_lsoa"] = start_codes
+    out["end_lsoa"] = end_codes
+    out["start_lsoa_distance_km"] = start_distances
+    out["end_lsoa_distance_km"] = end_distances
+    out["start_lsoa_match_method"] = pd.Series(start_codes).replace("", pd.NA).notna().map(
+        {True: "centroid_nearest", False: "no_match"}
+    ).to_numpy()
+    out["end_lsoa_match_method"] = pd.Series(end_codes).replace("", pd.NA).notna().map(
+        {True: "centroid_nearest", False: "no_match"}
+    ).to_numpy()
+    return out
