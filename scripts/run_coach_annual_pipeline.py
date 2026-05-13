@@ -92,6 +92,9 @@ def run_pipeline(
     warm_up_days: int,
     limit: int | None,
     n_workers: int,
+    allow_layover_charging: bool = False,
+    layover_charge_kw: float = 0.0,
+    min_layover_for_charging_h: float = 0.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if n_workers != 1:
         LOG.warning("n_workers=%s requested; annual v1 still runs serially.", n_workers)
@@ -119,6 +122,9 @@ def run_pipeline(
         journeys,
         seed=int(seed),
         warm_up_days=int(warm_up_days),
+        allow_layover_charging=allow_layover_charging,
+        layover_charge_kw=float(layover_charge_kw),
+        min_layover_for_charging_h=float(min_layover_for_charging_h),
     )
 
     per_chain_out.parent.mkdir(parents=True, exist_ok=True)
@@ -145,6 +151,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--warm-up-days", type=int, default=0)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--n-workers", type=int, default=1)
+    parser.add_argument("--allow-layover-charging", action="store_true", default=False)
+    parser.add_argument("--layover-charge-kw", type=float, default=0.0)
+    parser.add_argument("--min-layover-for-charging-h", type=float, default=0.0)
     return parser
 
 
@@ -162,6 +171,9 @@ def main(argv: list[str] | None = None) -> int:
             warm_up_days=args.warm_up_days,
             limit=args.limit,
             n_workers=args.n_workers,
+            allow_layover_charging=args.allow_layover_charging,
+            layover_charge_kw=args.layover_charge_kw,
+            min_layover_for_charging_h=args.min_layover_for_charging_h,
         )
     except Exception:  # noqa: BLE001 - top-level guard for CLI use
         LOG.exception("coach annual pipeline failed")

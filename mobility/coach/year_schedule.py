@@ -67,19 +67,21 @@ def _event(
     end_h: float,
     purpose: str,
     *,
-    terminus_charge_kw: float,
+    can_charge: bool,
+    charge_power_kw: float,
     location_lsoa: str = "",
 ) -> ParkingEvent | None:
     if end_h <= start_h:
         return None
+    can_charge = bool(can_charge and float(charge_power_kw) > 0.0)
     return ParkingEvent(
         start_time=float(start_h),
         end_time=float(end_h),
         duration_hours=float(end_h - start_h),
         location_purpose=purpose,
         location_lsoa=str(location_lsoa or ""),
-        can_charge=terminus_charge_kw > 0.0,
-        charge_power_kw=float(terminus_charge_kw) if terminus_charge_kw > 0.0 else 0.0,
+        can_charge=can_charge,
+        charge_power_kw=float(charge_power_kw) if can_charge else 0.0,
     )
 
 
@@ -89,6 +91,9 @@ def _attach_chain_parking(
     pre_journey_dwell_h: float,
     terminus_charge_kw: float,
     terminus_dwell_purpose: str,
+    allow_layover_charging: bool,
+    layover_charge_kw: float,
+    min_layover_for_charging_h: float,
 ) -> None:
     trips = sorted(schedule.trips, key=lambda trip: (trip.departure_time, trip.arrival_time, trip.trip_id))
     schedule.trips = trips
@@ -98,7 +103,8 @@ def _attach_chain_parking(
             0.0,
             HOURS_PER_DAY,
             terminus_dwell_purpose,
-            terminus_charge_kw=terminus_charge_kw,
+            can_charge=True,
+            charge_power_kw=terminus_charge_kw,
         )
         if full_day is not None:
             schedule.parking_events.append(full_day)
@@ -109,19 +115,27 @@ def _attach_chain_parking(
         max(0.0, float(first.departure_time) - float(pre_journey_dwell_h)),
         float(first.departure_time),
         terminus_dwell_purpose,
-        terminus_charge_kw=terminus_charge_kw,
+        can_charge=True,
+        charge_power_kw=terminus_charge_kw,
         location_lsoa=getattr(first, "origin_lsoa", ""),
     )
     if pre_event is not None:
         schedule.parking_events.append(pre_event)
 
     for left, right in zip(trips[:-1], trips[1:]):
+        duration_h = float(right.departure_time) - float(left.arrival_time)
+        location_lsoa = str(getattr(left, "destination_lsoa", "") or "")
+        can_charge = bool(
+            allow_layover_charging
+            and duration_h >= float(min_layover_for_charging_h)
+        )
         dwell = _event(
             float(left.arrival_time),
             float(right.departure_time),
-            terminus_dwell_purpose,
-            terminus_charge_kw=terminus_charge_kw,
-            location_lsoa=getattr(left, "destination_lsoa", ""),
+            "layover",
+            can_charge=can_charge,
+            charge_power_kw=layover_charge_kw,
+            location_lsoa=location_lsoa,
         )
         if dwell is not None:
             schedule.parking_events.append(dwell)
@@ -131,7 +145,8 @@ def _attach_chain_parking(
         float(last.arrival_time),
         HOURS_PER_DAY,
         terminus_dwell_purpose,
-        terminus_charge_kw=terminus_charge_kw,
+        can_charge=True,
+        charge_power_kw=terminus_charge_kw,
         location_lsoa=getattr(last, "destination_lsoa", ""),
     )
     if post_event is not None:
@@ -143,15 +158,18 @@ def chain_to_year_schedules(
     active_dates: Iterable[dt.date],
     *,
     pre_journey_dwell_h: float = 6.0,
-    terminus_dwell_purpose: str = "terminus_dwell",
+    terminus_dwell_purpose: str = "depot_terminus",
     consumption_kwh_per_km: float | None = None,
     terminus_charge_kw: float = 50.0,
+    allow_layover_charging: bool = False,
+    layover_charge_kw: float = 0.0,
+    min_layover_for_charging_h: float = 0.0,
 ) -> list[DailySchedule]:
     """Expand one synthetic coach chain across the coach feed year."""
     if pre_journey_dwell_h < 0.0:
         raise ValueError("pre_journey_dwell_h must be non-negative.")
-    if terminus_charge_kw < 0.0:
-        raise ValueError("terminus_charge_kw must be non-negative.")
+    if terminus_charge_kw < 0.0 or layover_charge_kw < 0.0:
+        raise ValueError("charge powers must be non-negative.")
     if chain_journeys.empty:
         raise ValueError("chain_journeys must contain at least one journey.")
 
@@ -196,6 +214,9 @@ def chain_to_year_schedules(
             pre_journey_dwell_h=pre_journey_dwell_h,
             terminus_charge_kw=terminus_charge_kw,
             terminus_dwell_purpose=terminus_dwell_purpose,
+            allow_layover_charging=allow_layover_charging,
+            layover_charge_kw=layover_charge_kw,
+            min_layover_for_charging_h=min_layover_for_charging_h,
         )
         schedule.metadata = {
             "chain_id": chain_id,

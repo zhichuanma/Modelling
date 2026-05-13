@@ -29,7 +29,7 @@ cells.append(
 
         方法骨架是 `TxC inventory -> TxC XML per service -> operating profile -> vehicle journey -> journey_id -> coach_chain_id -> DailySchedule -> feed-year expansion -> SOC/load profile`。与 bus 的 `block_id` 不同，`coach_chain_id` 是本 simulation 用 first-fit heuristic 构造出来的，不是数据源给出的真实 operator 车辆排班。
 
-        关键 caveat 是 feed-year 来自 TxC operating periods，notebook 使用 small smoke chains 和 `warm_up_days=0` 以便快速执行；production annual runs 应使用 `WARMUP_DAYS=14`。`terminus_charge_kw` 表示车辆回到一个能慢充的终点站，E.5 的 LSOA terminus capacity 是从 simulation 反推的 synthetic map，不是真实 depot 或公共充电桩 inventory。
+        关键 caveat 是 feed-year 来自 TxC operating periods，notebook 使用 small smoke chains 和 `warm_up_days=0` 以便快速执行；production annual runs 应使用 `WARMUP_DAYS=14` 或更长。`terminus_charge_kw` 表示车辆回到一个能慢充的终点站；trip 间 layover charging 默认关闭。E.5 的 LSOA terminus capacity 是从 simulation 反推的 synthetic map，不是真实 depot 或公共充电桩 inventory。
         """
     )
 )
@@ -249,7 +249,7 @@ cells.append(
         for park in one_day.parking_events:
             ax.barh(1, park.end_time - park.start_time, left=park.start_time, height=0.36, color="lightgray")
         ax.set_yticks([0, 1])
-        ax.set_yticklabels(["journey", "terminus_dwell"])
+        ax.set_yticklabels(["journey", "parking"])
         ax.set(title=f"Protagonist coach chain {protagonist_id}: one active-day timeline", xlabel="hour of day", xlim=(0, 24))
         ax.grid(alpha=0.25)
         plt.tight_layout()
@@ -294,7 +294,7 @@ cells.append(
         """
         ## B.5 充电逻辑
 
-        本段解释 coach 版本的最小物理递推：$SOC_{t+1} = \\mathrm{clip}\\left[SOC_t - \\frac{E_{journey,t}}{B} + \\frac{P_{park,t} \\cdot \\Delta t}{B},\\ 0,\\ 1\\right]$。`terminus_charge_kw` 表示车辆回到一个能慢充的终点站；当前不区分 depot 与 en-route fast charger，这与 bus 的 `depot_terminus` 抽象一致，但 coach 版本还没有引入 layover/public fast-charger eligibility。
+        本段解释 coach 版本的最小物理递推：$SOC_{t+1} = \\mathrm{clip}\\left[SOC_t - \\frac{E_{journey,t}}{B} + \\frac{P_{park,t} \\cdot \\Delta t}{B},\\ 0,\\ 1\\right]$。`terminus_charge_kw` 表示车辆回到一个能慢充的 `depot_terminus`；同一天 trip 之间是 `layover`，默认不充电。
         """
     )
 )
@@ -530,6 +530,7 @@ cells.append(
                 ("no utilization", "ceiling_kwh_year = terminus_total_kw * 8760, with no utilisation coefficient"),
                 ("no operator real blocking", "no CPT/DfT/operator roster data are used"),
                 ("warm_up_days=0 is smoke-only", f"production annual runs should use WARMUP_DAYS={WARMUP_DAYS}"),
+                ("Layover charging policy", "off by default; opt-in at OCM-eligible LSOAs"),
                 ("feed-year only", f"date window is {COACH_FEED_YEAR_START} to {COACH_FEED_YEAR_END}"),
             ],
             columns=["label", "meaning"],

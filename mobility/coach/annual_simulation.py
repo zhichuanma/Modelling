@@ -128,6 +128,17 @@ def _simulate_with_annual_warmup(
     return soc, load_kw, float(soc_after_warmup)
 
 
+def _parking_energy_kwh(schedules, purpose: str) -> float:
+    return float(
+        sum(
+            event.energy_charged_kwh
+            for schedule in schedules
+            for event in schedule.parking_events
+            if event.location_purpose == purpose
+        )
+    )
+
+
 def _infeasibility_reasons(
     chain_journeys: pd.DataFrame,
     *,
@@ -164,6 +175,9 @@ def simulate_coach_chain_year(
     terminus_charge_kw: float = DEFAULT_TERMINUS_CHARGE_KW,
     chemistry: str = DEFAULT_CHEMISTRY,
     pre_journey_dwell_h: float = 6.0,
+    allow_layover_charging: bool = False,
+    layover_charge_kw: float = 0.0,
+    min_layover_for_charging_h: float = 0.0,
 ) -> dict:
     """Simulate one synthetic coach chain across the coach feed year."""
     if chain_journeys.empty:
@@ -185,6 +199,9 @@ def simulate_coach_chain_year(
         pre_journey_dwell_h=pre_journey_dwell_h,
         consumption_kwh_per_km=consumption_kwh_per_km,
         terminus_charge_kw=terminus_charge_kw,
+        allow_layover_charging=allow_layover_charging,
+        layover_charge_kw=layover_charge_kw,
+        min_layover_for_charging_h=min_layover_for_charging_h,
     )
     for schedule in schedules:
         schedule.ev_id = str(chain_id)
@@ -223,9 +240,13 @@ def simulate_coach_chain_year(
         "total_consumed_kwh": total_kwh,
         "annual_distance_km": annual_distance_km,
         "energy_charged_kwh": energy_charged_kwh,
+        "depot_kwh": _parking_energy_kwh(schedules, "depot_terminus"),
+        "layover_kwh": _parking_energy_kwh(schedules, "layover"),
         "battery_kwh": battery_kwh,
         "consumption_kwh_per_km": consumption_kwh_per_km,
         "terminus_charge_kw": float(terminus_charge_kw),
+        "allow_layover_charging": bool(allow_layover_charging),
+        "layover_charge_kw": float(layover_charge_kw),
         "n_active_days": int(len(active_date_set)),
         "feasible": bool(not reasons),
         "infeasibility_reasons": reasons,
@@ -278,6 +299,9 @@ def simulate_coach_fleet_year(
     journeys_df,
     *,
     seed: int,
+    allow_layover_charging: bool = False,
+    layover_charge_kw: float = 0.0,
+    min_layover_for_charging_h: float = 0.0,
     **kw,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Simulate a synthetic coach chain fleet and return metrics plus load rows."""
@@ -289,6 +313,8 @@ def simulate_coach_fleet_year(
                 "total_kwh",
                 "energy_charged_kwh",
                 "terminus_charge_kw",
+                "depot_kwh",
+                "layover_kwh",
                 "n_active_days",
                 "soc_floor_hit_h_min",
                 "feasible",
@@ -310,6 +336,9 @@ def simulate_coach_fleet_year(
                 template,
                 ev_spec,
                 active_dates,
+                allow_layover_charging=allow_layover_charging,
+                layover_charge_kw=layover_charge_kw,
+                min_layover_for_charging_h=min_layover_for_charging_h,
                 **kw,
             )
             load_frames.append(_load_profile_frame(str(chain_id), result["load_kw"]))
@@ -319,6 +348,8 @@ def simulate_coach_fleet_year(
                 "total_kwh": result["total_kwh"],
                 "energy_charged_kwh": result["energy_charged_kwh"],
                 "terminus_charge_kw": result["terminus_charge_kw"],
+                "depot_kwh": result["depot_kwh"],
+                "layover_kwh": result["layover_kwh"],
                 "n_active_days": result["n_active_days"],
                 "soc_floor_hit_h_min": (
                     float(result["soc_floor_hit_h_min"])
@@ -338,6 +369,8 @@ def simulate_coach_fleet_year(
                 "total_kwh": np.nan,
                 "energy_charged_kwh": np.nan,
                 "terminus_charge_kw": float(kw.get("terminus_charge_kw", DEFAULT_TERMINUS_CHARGE_KW)),
+                "depot_kwh": np.nan,
+                "layover_kwh": np.nan,
                 "n_active_days": int(group["date"].nunique()),
                 "soc_floor_hit_h_min": np.nan,
                 "feasible": False,

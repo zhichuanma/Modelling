@@ -127,3 +127,27 @@ def test_warm_up_days_burns_in_soc() -> None:
         warmed["load_kw"][:STEPS_PER_DAY_DECISION].sum(),
         cold["load_kw"][:STEPS_PER_DAY_DECISION].sum(),
     )
+
+
+def test_layover_off_lowers_energy_charged_vs_on() -> None:
+    dates = annual_dates()
+    common = {
+        "chain_id": "C1",
+        "chain_journeys": _journeys(),
+        "ev_spec": {"EV_ID": "EV1", "Energy_kWh": 400.0, "consumption_kwh_per_km": 0.8},
+        "active_dates": [dates[0]],
+        "warm_up_days": 0,
+        "soc_init": 0.5,
+        "terminus_charge_kw": 0.0,
+    }
+
+    off = simulate_coach_chain_year(**common)
+    on = simulate_coach_chain_year(
+        **common,
+        allow_layover_charging=True,
+        layover_charge_kw=50.0,
+        min_layover_for_charging_h=1.0,
+    )
+
+    assert on["energy_charged_kwh"] > off["energy_charged_kwh"]
+    assert on["layover_kwh"] > off["layover_kwh"]
