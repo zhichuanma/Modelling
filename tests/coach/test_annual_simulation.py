@@ -5,7 +5,7 @@ import pandas as pd
 
 from mobility.coach.annual_simulation import simulate_coach_chain_year, simulate_coach_fleet_year
 from mobility.coach.year_schedule import annual_dates
-from mobility.core.constants import STEPS_PER_DAY_DECISION
+from mobility.core.constants import STEP_HOURS_DECISION, STEPS_PER_DAY_DECISION
 
 
 def _journeys(*, cross_midnight: bool = False) -> pd.DataFrame:
@@ -93,7 +93,13 @@ def test_cross_midnight_chain_soc_is_continuous_at_day_boundary() -> None:
     soc = result["soc"]
     assert len(soc) == len(dates) * STEPS_PER_DAY_DECISION
     assert np.isfinite(soc).all()
-    assert abs(float(soc[STEPS_PER_DAY_DECISION]) - float(soc[STEPS_PER_DAY_DECISION - 1])) < 0.05
+    expected_step_drop = (80.0 * 0.5 / 400.0) / (2.0 / STEP_HOURS_DECISION)
+    left_step_drop = float(soc[STEPS_PER_DAY_DECISION - 2] - soc[STEPS_PER_DAY_DECISION - 1])
+    right_step_drop = float(soc[STEPS_PER_DAY_DECISION] - soc[STEPS_PER_DAY_DECISION + 1])
+    assert left_step_drop > 0.0
+    assert right_step_drop > 0.0
+    assert abs(left_step_drop - expected_step_drop) < 1e-9
+    assert abs(right_step_drop - expected_step_drop) < 1e-9
 
 
 def test_warm_up_days_burns_in_soc() -> None:

@@ -209,13 +209,16 @@ def simulate_coach_chain_year(
         metadata["chain_id"] = str(chain_id)
         schedule.metadata = metadata
 
-    soc, load_kw, soc_after_warmup = _simulate_with_annual_warmup(
+    soc_full, load_full, soc_after_warmup = _simulate_with_annual_warmup(
         schedules,
         battery_kwh,
         soc_init=start_soc,
         warm_up_days=int(warm_up_days),
         chemistry=chemistry,
     )
+    output_steps = len(annual_dates()) * STEPS_PER_DAY_DECISION
+    soc = soc_full[:output_steps]
+    load_kw = load_full[:output_steps]
     total_kwh = float(sum(trip.energy_consumed_kwh for schedule in schedules for trip in schedule.trips))
     annual_distance_km = float(sum(trip.distance_km for schedule in schedules for trip in schedule.trips))
     energy_charged_kwh = float(np.sum(load_kw) * STEP_HOURS_DECISION)
@@ -240,14 +243,19 @@ def simulate_coach_chain_year(
         "total_consumed_kwh": total_kwh,
         "annual_distance_km": annual_distance_km,
         "energy_charged_kwh": energy_charged_kwh,
-        "depot_kwh": _parking_energy_kwh(schedules, "depot_terminus"),
-        "layover_kwh": _parking_energy_kwh(schedules, "layover"),
+        "depot_kwh": _parking_energy_kwh(schedules[: len(annual_dates())], "depot_terminus"),
+        "layover_kwh": _parking_energy_kwh(schedules[: len(annual_dates())], "layover"),
         "battery_kwh": battery_kwh,
         "consumption_kwh_per_km": consumption_kwh_per_km,
         "terminus_charge_kw": float(terminus_charge_kw),
         "allow_layover_charging": bool(allow_layover_charging),
         "layover_charge_kw": float(layover_charge_kw),
         "n_active_days": int(len(active_date_set)),
+        "n_schedule_days": int(len(schedules)),
+        "n_output_days": int(len(annual_dates())),
+        "overflow_trip_count": int(
+            sum(len(schedules[i].trips) for i in range(len(annual_dates()), len(schedules)))
+        ),
         "feasible": bool(not reasons),
         "infeasibility_reasons": reasons,
     }
@@ -316,6 +324,9 @@ def simulate_coach_fleet_year(
                 "depot_kwh",
                 "layover_kwh",
                 "n_active_days",
+                "n_schedule_days",
+                "n_output_days",
+                "overflow_trip_count",
                 "soc_floor_hit_h_min",
                 "feasible",
                 "infeasibility_reasons",
@@ -351,6 +362,9 @@ def simulate_coach_fleet_year(
                 "depot_kwh": result["depot_kwh"],
                 "layover_kwh": result["layover_kwh"],
                 "n_active_days": result["n_active_days"],
+                "n_schedule_days": result["n_schedule_days"],
+                "n_output_days": result["n_output_days"],
+                "overflow_trip_count": result["overflow_trip_count"],
                 "soc_floor_hit_h_min": (
                     float(result["soc_floor_hit_h_min"])
                     if result["soc_floor_hit_h_min"] is not None
@@ -372,6 +386,9 @@ def simulate_coach_fleet_year(
                 "depot_kwh": np.nan,
                 "layover_kwh": np.nan,
                 "n_active_days": int(group["date"].nunique()),
+                "n_schedule_days": 0,
+                "n_output_days": len(annual_dates()),
+                "overflow_trip_count": 0,
                 "soc_floor_hit_h_min": np.nan,
                 "feasible": False,
                 "infeasibility_reasons": "simulation_error",

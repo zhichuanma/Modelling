@@ -174,7 +174,9 @@ def chain_to_year_schedules(
         raise ValueError("chain_journeys must contain at least one journey.")
 
     dates = annual_dates()
-    date_to_index = {date: index for index, date in enumerate(dates)}
+    internal_dates = dates + [dates[-1] + dt.timedelta(days=1)]
+    overflow_date = internal_dates[-1]
+    date_to_index = {date: index for index, date in enumerate(internal_dates)}
     chain_id = _chain_id(chain_journeys)
     schedules = {
         date: DailySchedule(ev_id=chain_id, day=index, day_type=date.strftime("%A").lower(), date=date)
@@ -208,24 +210,31 @@ def chain_to_year_schedules(
                     stamped.schedule_date = target_date
                     target.trips.append(stamped)
 
-    for schedule in schedules.values():
-        _attach_chain_parking(
-            schedule,
-            pre_journey_dwell_h=pre_journey_dwell_h,
-            terminus_charge_kw=terminus_charge_kw,
-            terminus_dwell_purpose=terminus_dwell_purpose,
-            allow_layover_charging=allow_layover_charging,
-            layover_charge_kw=layover_charge_kw,
-            min_layover_for_charging_h=min_layover_for_charging_h,
-        )
+    for date_value in internal_dates:
+        schedule = schedules[date_value]
+        is_overflow_day = date_value == overflow_date
+        if is_overflow_day:
+            schedule.trips = sorted(schedule.trips, key=lambda trip: (trip.departure_time, trip.arrival_time, trip.trip_id))
+            schedule.parking_events = []
+        else:
+            _attach_chain_parking(
+                schedule,
+                pre_journey_dwell_h=pre_journey_dwell_h,
+                terminus_charge_kw=terminus_charge_kw,
+                terminus_dwell_purpose=terminus_dwell_purpose,
+                allow_layover_charging=allow_layover_charging,
+                layover_charge_kw=layover_charge_kw,
+                min_layover_for_charging_h=min_layover_for_charging_h,
+            )
         schedule.metadata = {
             "chain_id": chain_id,
             "date": schedule.date.isoformat() if schedule.date is not None else "",
             "is_active": bool(schedule.trips),
             "n_trips": int(len(schedule.trips)),
+            "is_overflow_day": bool(is_overflow_day),
         }
 
-    return [schedules[date] for date in dates]
+    return [schedules[date] for date in internal_dates]
 
 
 __all__ = ["annual_dates", "chain_to_year_schedules"]
