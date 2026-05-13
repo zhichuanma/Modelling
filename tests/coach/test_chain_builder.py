@@ -52,4 +52,39 @@ def test_far_relocation_splits_into_two_chains() -> None:
     )
 
     assert chains["coach_chain_id"].nunique() == 2
-    assert set(chains["coach_chain_template_id"]) == {"OP_001", "OP_002"}
+    template_ids = set(chains["coach_chain_template_id"])
+    assert len(template_ids) == 2
+    assert all(template_id.startswith("OP_") for template_id in template_ids)
+
+
+def test_template_id_uses_journey_set_not_daily_chain_index() -> None:
+    d1 = ACTIVE_DATE
+    d2 = ACTIVE_DATE + dt.timedelta(days=1)
+    journeys = pd.DataFrame(
+        {
+            "journey_id": ["J1", "J2", "J3"],
+            "operator_code": ["OP"] * 3,
+            "start_h": [8.0, 11.0, 11.0],
+            "end_h": [10.0, 12.0, 12.0],
+            "start_lat": [51.500, 51.501, 51.501],
+            "start_lon": [-0.100, -0.101, -0.101],
+            "end_lat": [51.501, 51.502, 51.502],
+            "end_lon": [-0.101, -0.102, -0.102],
+        }
+    )
+    date_index = pd.DataFrame(
+        {
+            "journey_id": ["J1", "J2", "J1", "J3"],
+            "date": [d1, d1, d2, d2],
+        }
+    )
+
+    chains = build_coach_chains(journeys, date_index)
+    per_date = chains.groupby("date").agg(
+        chain_id=("coach_chain_id", "first"),
+        template_id=("coach_chain_template_id", "first"),
+    )
+
+    assert per_date.loc[d1, "chain_id"].endswith("_001")
+    assert per_date.loc[d2, "chain_id"].endswith("_001")
+    assert per_date.loc[d1, "template_id"] != per_date.loc[d2, "template_id"]

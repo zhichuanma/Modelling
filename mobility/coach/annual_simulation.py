@@ -233,7 +233,13 @@ def _chain_group_column(chains_df: pd.DataFrame) -> str:
     raise ValueError("chains_df must include coach_chain_id or chain_id.")
 
 
-def _chain_template(group: pd.DataFrame, journeys_df: pd.DataFrame) -> pd.DataFrame:
+def _chain_template(group: pd.DataFrame, journeys_df: pd.DataFrame, chain_id: str = "unknown") -> pd.DataFrame:
+    if {"date", "journey_id"}.issubset(group.columns):
+        per_date_sets = group.groupby("date")["journey_id"].agg(lambda s: tuple(sorted(s.astype(str))))
+        if per_date_sets.nunique() > 1:
+            raise AssertionError(
+                f"chain template {chain_id} has inconsistent journey sets across dates: {per_date_sets.unique()}"
+            )
     ordered_cols = [col for col in ("date", "position_in_chain", "journey_id") if col in group.columns]
     ordered = group.sort_values(ordered_cols, kind="stable") if ordered_cols else group
     first_rows = ordered.drop_duplicates("journey_id", keep="first")
@@ -290,7 +296,7 @@ def simulate_coach_fleet_year(
     load_frames: list[pd.DataFrame] = []
     for chain_id, group in chains_df.groupby(group_col, sort=False):
         ev_spec = sample_coach_ev(fleet_df, rng)
-        template = _chain_template(group, journeys_df)
+        template = _chain_template(group, journeys_df, chain_id=str(chain_id))
         active_dates = sorted({_coerce_date(value) for value in group["date"]})
         try:
             result = simulate_coach_chain_year(

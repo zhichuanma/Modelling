@@ -15,6 +15,7 @@ building chains.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 from typing import Any
 
 import pandas as pd
@@ -122,7 +123,7 @@ def build_coach_chains(
         chains: list[list[pd.Series]] = []
         for _, row in ordered.iterrows():
             placed = False
-            for chain_index, chain in enumerate(chains, start=1):
+            for chain in chains:
                 if _can_append(
                     chain[-1],
                     row,
@@ -130,32 +131,29 @@ def build_coach_chains(
                     max_relocation_km=max_relocation_km,
                 ):
                     chain.append(row)
-                    records.append(
-                        {
-                            "journey_id": str(row["journey_id"]),
-                            "date": active_date,
-                            "coach_chain_id": f"{operator_code}_{active_date.isoformat()}_{chain_index:03d}",
-                            "position_in_chain": len(chain),
-                            "coach_chain_template_id": f"{operator_code}_{chain_index:03d}",
-                            "operator_code": str(operator_code),
-                        }
-                    )
                     placed = True
                     break
             if placed:
                 continue
             chains.append([row])
-            chain_index = len(chains)
-            records.append(
-                {
-                    "journey_id": str(row["journey_id"]),
-                    "date": active_date,
-                    "coach_chain_id": f"{operator_code}_{active_date.isoformat()}_{chain_index:03d}",
-                    "position_in_chain": 1,
-                    "coach_chain_template_id": f"{operator_code}_{chain_index:03d}",
-                    "operator_code": str(operator_code),
-                }
-            )
+
+        for chain_index, chain in enumerate(chains, start=1):
+            journey_set_hash = hashlib.sha1(
+                ",".join(sorted(str(row["journey_id"]) for row in chain)).encode()
+            ).hexdigest()[:10]
+            template_id = f"{operator_code}_{journey_set_hash}"
+            chain_id = f"{operator_code}_{active_date.isoformat()}_{chain_index:03d}"
+            for position, row in enumerate(chain, start=1):
+                records.append(
+                    {
+                        "journey_id": str(row["journey_id"]),
+                        "date": active_date,
+                        "coach_chain_id": chain_id,
+                        "position_in_chain": position,
+                        "coach_chain_template_id": template_id,
+                        "operator_code": str(operator_code),
+                    }
+                )
 
     out = pd.DataFrame.from_records(
         records,
