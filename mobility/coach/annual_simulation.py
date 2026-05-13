@@ -81,7 +81,7 @@ def _coerce_date(value: Any) -> dt.date:
     return pd.Timestamp(value).date()
 
 
-def _simulate_with_active_warmup(
+def _simulate_with_annual_warmup(
     schedules,
     battery_kwh: float,
     *,
@@ -89,6 +89,15 @@ def _simulate_with_active_warmup(
     warm_up_days: int,
     chemistry: str,
 ) -> tuple[np.ndarray, np.ndarray, float]:
+    """Run the bus-style calendar-day warm-up window.
+
+    Note: Coach chain templates are sparse compared to bus blocks--a template
+    may be inactive in the first few calendar days of the feed year. As a
+    result the warm_up_days window often contains many inactive (24h depot
+    dwell) days that do not drive realistic SoC burn-in. Recommend
+    warm_up_days >= 21 for production runs to raise the probability that the
+    first real journey lands inside the warm-up window.
+    """
     if warm_up_days < 0:
         raise ValueError("warm_up_days must be non-negative.")
     if warm_up_days == 0:
@@ -99,23 +108,20 @@ def _simulate_with_active_warmup(
             warm_up_days=0,
             chemistry=chemistry,
         )
+    if warm_up_days >= len(schedules):
+        raise ValueError("warm_up_days must be smaller than the annual schedule length.")
 
-    active_schedules = [schedule for schedule in schedules if schedule.trips]
-    if not active_schedules:
-        soc_after_warmup = float(soc_init)
-    else:
-        warmup = active_schedules[: min(int(warm_up_days), len(active_schedules))]
-        _warm_soc, _warm_load, soc_after_warmup = simulate_single_ev(
-            warmup,
-            battery_kwh,
-            soc_init=soc_init,
-            warm_up_days=0,
-            chemistry=chemistry,
-        )
+    _, _, soc_after_warmup = simulate_single_ev(
+        schedules[: warm_up_days + 1],
+        battery_kwh,
+        soc_init=soc_init,
+        warm_up_days=warm_up_days,
+        chemistry=chemistry,
+    )
     soc, load_kw, _ = simulate_single_ev(
         schedules,
         battery_kwh,
-        soc_init=float(soc_after_warmup),
+        soc_init=soc_after_warmup,
         warm_up_days=0,
         chemistry=chemistry,
     )
@@ -186,7 +192,7 @@ def simulate_coach_chain_year(
         metadata["chain_id"] = str(chain_id)
         schedule.metadata = metadata
 
-    soc, load_kw, soc_after_warmup = _simulate_with_active_warmup(
+    soc, load_kw, soc_after_warmup = _simulate_with_annual_warmup(
         schedules,
         battery_kwh,
         soc_init=start_soc,

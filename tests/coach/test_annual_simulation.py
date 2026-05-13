@@ -94,3 +94,36 @@ def test_cross_midnight_chain_soc_is_continuous_at_day_boundary() -> None:
     assert len(soc) == len(dates) * STEPS_PER_DAY_DECISION
     assert np.isfinite(soc).all()
     assert abs(float(soc[STEPS_PER_DAY_DECISION]) - float(soc[STEPS_PER_DAY_DECISION - 1])) < 0.05
+
+
+def test_warm_up_days_burns_in_soc() -> None:
+    dates = annual_dates()
+    ev_spec = {"EV_ID": "EV1", "Energy_kWh": 400.0, "consumption_kwh_per_km": 0.8}
+
+    cold = simulate_coach_chain_year(
+        "C1",
+        _journeys(),
+        ev_spec,
+        dates,
+        warm_up_days=0,
+        soc_init=1.0,
+        terminus_charge_kw=50.0,
+    )
+    warmed = simulate_coach_chain_year(
+        "C1",
+        _journeys(),
+        ev_spec,
+        dates,
+        warm_up_days=14,
+        soc_init=1.0,
+        terminus_charge_kw=50.0,
+    )
+
+    assert warmed["load_kw"].shape[0] == STEPS_PER_DAY_DECISION * len(dates)
+    assert warmed["soc_after_warmup"] < 1.0
+    assert warmed["n_active_days"] == len(dates)
+    assert sum(1 for schedule in warmed["schedules"][: len(dates)] if schedule.trips) == len(dates)
+    assert not np.isclose(
+        warmed["load_kw"][:STEPS_PER_DAY_DECISION].sum(),
+        cold["load_kw"][:STEPS_PER_DAY_DECISION].sum(),
+    )
