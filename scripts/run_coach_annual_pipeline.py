@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from mobility.coach.annual_simulation import simulate_coach_fleet_year
 from mobility.coach.calendar import build_journey_date_index
+from mobility.coach.charging_supply import DEFAULT_OCM_PATH, eligible_lsoa_kw, load_coach_eligible_stations
 from mobility.coach.chain_builder import build_coach_chains
 from mobility.coach.coach_fleet import COACH_FLEET_PATH, load_coach_fleet
 from mobility.coach.data_loader import DEFAULT_COACH_ROOT, DEFAULT_JOURNEYS_PATH, DEFAULT_STOP_SEQUENCES_PATH
@@ -95,6 +96,8 @@ def run_pipeline(
     allow_layover_charging: bool = False,
     layover_charge_kw: float = 0.0,
     min_layover_for_charging_h: float = 0.0,
+    enable_eligible_layover_retry: bool = False,
+    ocm_path: Path = DEFAULT_OCM_PATH,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if n_workers != 1:
         LOG.warning("n_workers=%s requested; annual v1 still runs serially.", n_workers)
@@ -115,6 +118,12 @@ def run_pipeline(
 
     LOG.info("loading coach fleet from %s", fleet_path)
     fleet = load_coach_fleet(fleet_path)
+    eligible_layover_lsoas = None
+    if enable_eligible_layover_retry:
+        LOG.info("loading coach-eligible OCM stations from %s", ocm_path)
+        eligible = eligible_lsoa_kw(load_coach_eligible_stations(ocm_path))
+        eligible_layover_lsoas = set(eligible.index.astype(str))
+        LOG.info("eligible coach layover LSOAs: %d", len(eligible_layover_lsoas))
     LOG.info("simulating %d synthetic chain templates", chains["coach_chain_template_id"].nunique())
     per_chain, load_profile = simulate_coach_fleet_year(
         chains,
@@ -125,6 +134,7 @@ def run_pipeline(
         allow_layover_charging=allow_layover_charging,
         layover_charge_kw=float(layover_charge_kw),
         min_layover_for_charging_h=float(min_layover_for_charging_h),
+        eligible_layover_lsoas=eligible_layover_lsoas,
     )
 
     per_chain_out.parent.mkdir(parents=True, exist_ok=True)
@@ -154,6 +164,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-layover-charging", action="store_true", default=False)
     parser.add_argument("--layover-charge-kw", type=float, default=0.0)
     parser.add_argument("--min-layover-for-charging-h", type=float, default=0.0)
+    parser.add_argument("--enable-eligible-layover-retry", action="store_true", default=False)
+    parser.add_argument("--ocm-path", type=Path, default=DEFAULT_OCM_PATH)
     return parser
 
 
@@ -174,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
             allow_layover_charging=args.allow_layover_charging,
             layover_charge_kw=args.layover_charge_kw,
             min_layover_for_charging_h=args.min_layover_for_charging_h,
+            enable_eligible_layover_retry=args.enable_eligible_layover_retry,
+            ocm_path=args.ocm_path,
         )
     except Exception:  # noqa: BLE001 - top-level guard for CLI use
         LOG.exception("coach annual pipeline failed")

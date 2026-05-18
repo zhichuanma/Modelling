@@ -133,6 +133,21 @@ def _fill_session_soc(
         parking_event.energy_charged_kwh = float(np.sum(step_energy_kwh * event_share))
 
 
+def _fill_trip_soc(
+    schedule: DailySchedule,
+    soc_profile: np.ndarray,
+) -> None:
+    """Backfill trip-level SOC fields for downstream observability artifacts."""
+    soc_values = np.asarray(soc_profile, dtype=float)
+    soc_grid_minutes = _soc_grid_minutes(soc_values)
+
+    for trip in schedule.trips:
+        dep_min = trip.departure_time * MINUTES_PER_HOUR
+        arr_min = trip.arrival_time * MINUTES_PER_HOUR
+        trip.soc_before_trip = float(np.interp(dep_min, soc_grid_minutes, soc_values))
+        trip.soc_after_trip = float(np.interp(arr_min, soc_grid_minutes, soc_values))
+
+
 def compute_next_trip_soc_floor(
     schedule: DailySchedule,
     battery_kwh: float,
@@ -219,11 +234,13 @@ def simulate_single_day(
         cv_threshold,
     )
 
+    soc_with_start = np.concatenate((np.array([soc_start], dtype=float), soc_profile))
     _fill_session_soc(
         schedule,
-        np.concatenate((np.array([soc_start], dtype=float), soc_profile)),
+        soc_with_start,
         load_profile,
     )
+    _fill_trip_soc(schedule, soc_with_start)
     compute_next_trip_soc_floor(
         schedule,
         battery_capacity_kwh,

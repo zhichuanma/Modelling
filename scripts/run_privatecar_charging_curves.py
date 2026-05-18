@@ -16,6 +16,7 @@ import json
 import pandas as pd
 
 from mobility.cars.station_curves import (
+    GeographyPreflightError,
     export_web_json_files,
     run_preflight_referential_integrity_check,
     run_privatecar_station_curve_pipeline,
@@ -49,7 +50,28 @@ def parse_args() -> argparse.Namespace:
         "--max-vehicles",
         type=int,
         default=None,
-        help="Optional deterministic smoke/sample limit. Omit for full private-car fleet.",
+        help=(
+            "Optional deterministic head(n) smoke/sample limit. "
+            "Use stratified sample options for national coverage checks."
+        ),
+    )
+    parser.add_argument(
+        "--sample-n-per-country",
+        type=int,
+        default=None,
+        help="Optional deterministic country-prefix-stratified sample size per E/N/S/W group.",
+    )
+    parser.add_argument(
+        "--sample-fraction-by-country",
+        type=float,
+        default=None,
+        help="Optional deterministic sample fraction applied within each E/N/S/W group.",
+    )
+    parser.add_argument(
+        "--sample-seed",
+        type=int,
+        default=20260422,
+        help="Seed for country-prefix-stratified sample selection.",
     )
     parser.add_argument("--chunk-size", type=int, default=100)
     parser.add_argument(
@@ -95,7 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--preflight-only",
         action="store_true",
-        help="Only check private-car person_id referential integrity against person_week_library.",
+        help="Only run private-car referential-integrity and small-area geography preflight checks.",
     )
     parser.add_argument(
         "--web-station-id",
@@ -160,51 +182,76 @@ def _run_web_json_only(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    try:
+        if args.preflight_only:
+            report = run_preflight_referential_integrity_check(
+                data_dir=args.data_dir,
+                output_dir=args.output_dir,
+                destination_table_path=args.destination_table_path,
+                destination_cache_mode=args.destination_cache_mode,
+                year=args.year,
+            )
+            summary = report["summary"]
+            geography_summary = report.get("geography", {}).get("summary", {})
+            print("\n=== Private-car data quality preflight ===")
+            print(f"output_dir: {args.output_dir}")
+            print(f"private_car_vehicle_rows: {summary['private_car_vehicle_rows']:,}")
+            print(f"private_car_unique_person_ids: {summary['private_car_unique_person_ids']:,}")
+            print(f"person_week_library_unique_person_ids: {summary['person_week_library_unique_person_ids']:,}")
+            print(f"missing_person_id_count: {summary['missing_person_id_count']:,}")
+            print(f"missing_person_id_rate: {summary['missing_person_id_rate']:.9f}")
+            print(f"missing_vehicle_row_count: {summary['missing_vehicle_row_count']:,}")
+            print(f"dtype_mismatch_resolved_by_normalization: {summary['dtype_mismatch_resolved_by_normalization']}")
+            print(f"geography_status: {geography_summary.get('status', 'unknown')}")
+            print(f"geography_fail_fast: {geography_summary.get('fail_fast', False)}")
+            print(f"report: {args.output_dir / 'data_quality_report.md'}")
+            return
+    except GeographyPreflightError as exc:
+        print("\n=== Private-car geography preflight failed ===", file=sys.stderr)
+        print(str(exc), file=sys.stderr)
+        if exc.report_path is not None:
+            print(f"report: {exc.report_path}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
     if args.preflight_only:
-        report = run_preflight_referential_integrity_check(
-            data_dir=args.data_dir,
-            output_dir=args.output_dir,
-            year=args.year,
-        )
-        summary = report["summary"]
-        print("\n=== Private-car referential integrity preflight ===")
-        print(f"output_dir: {args.output_dir}")
-        print(f"private_car_vehicle_rows: {summary['private_car_vehicle_rows']:,}")
-        print(f"private_car_unique_person_ids: {summary['private_car_unique_person_ids']:,}")
-        print(f"person_week_library_unique_person_ids: {summary['person_week_library_unique_person_ids']:,}")
-        print(f"missing_person_id_count: {summary['missing_person_id_count']:,}")
-        print(f"missing_person_id_rate: {summary['missing_person_id_rate']:.9f}")
-        print(f"missing_vehicle_row_count: {summary['missing_vehicle_row_count']:,}")
-        print(f"dtype_mismatch_resolved_by_normalization: {summary['dtype_mismatch_resolved_by_normalization']}")
-        print(f"report: {args.output_dir / 'data_quality_report.md'}")
         return
 
     if args.web_json_only:
         _run_web_json_only(args)
         return
 
-    result = run_privatecar_station_curve_pipeline(
-        data_dir=args.data_dir,
-        output_dir=args.output_dir,
-        destination_table_path=args.destination_table_path,
-        destination_cache_mode=args.destination_cache_mode,
-        year=args.year,
-        max_vehicles=args.max_vehicles,
-        vehicle_shard_index=args.vehicle_shard_index,
-        vehicle_shard_count=args.vehicle_shard_count,
-        chunk_size=args.chunk_size,
-        main_seed=args.main_seed,
-        warmup_seed=args.warmup_seed,
-        write_web_json=not args.skip_web_json,
-        web_station_ids=args.web_station_id,
-        web_date_from=args.web_date_from,
-        web_date_to=args.web_date_to,
-        web_json_indent=None if args.compact_web_json else 2,
-        validate_written_json=not args.skip_json_parse_validation,
-        checkpoint_chunks=not args.no_checkpoint,
-        resume=args.resume,
-        progress_interval=args.progress_interval,
-    )
+    try:
+        result = run_privatecar_station_curve_pipeline(
+            data_dir=args.data_dir,
+            output_dir=args.output_dir,
+            destination_table_path=args.destination_table_path,
+            destination_cache_mode=args.destination_cache_mode,
+            year=args.year,
+            max_vehicles=args.max_vehicles,
+            sample_n_per_country=args.sample_n_per_country,
+            sample_fraction_by_country=args.sample_fraction_by_country,
+            sample_seed=args.sample_seed,
+            vehicle_shard_index=args.vehicle_shard_index,
+            vehicle_shard_count=args.vehicle_shard_count,
+            chunk_size=args.chunk_size,
+            main_seed=args.main_seed,
+            warmup_seed=args.warmup_seed,
+            write_web_json=not args.skip_web_json,
+            web_station_ids=args.web_station_id,
+            web_date_from=args.web_date_from,
+            web_date_to=args.web_date_to,
+            web_json_indent=None if args.compact_web_json else 2,
+            validate_written_json=not args.skip_json_parse_validation,
+            checkpoint_chunks=not args.no_checkpoint,
+            resume=args.resume,
+            progress_interval=args.progress_interval,
+        )
+    except GeographyPreflightError as exc:
+        print("\n=== Private-car geography preflight failed ===", file=sys.stderr)
+        print(str(exc), file=sys.stderr)
+        if exc.report_path is not None:
+            print(f"report: {exc.report_path}", file=sys.stderr)
+        raise SystemExit(2) from exc
     metrics = result["metrics"]
     print("\n=== Private-car station curve outputs ===")
     print(f"output_dir: {result['output_dir']}")

@@ -25,6 +25,16 @@ import numpy as np
 import pandas as pd
 
 from mobility.cars.data_loader import load_ev_fleet
+from mobility.cars.geography_preflight import (
+    HEAD_SAMPLE_WARNING,
+    GeographyPreflightError,
+    build_privatecar_geography_preflight_report,
+    geography_preflight_markdown_lines,
+    raise_for_geography_preflight,
+    write_preflight_geography_outputs,
+)
+from mobility.cars.scotland_geography import unify_scotland_ev_home_lsoa_to_dz2022
+from mobility.cars import holiday_rules
 from mobility.cars.station_matcher import (
     _build_lsoa_indices,
     match_stations_for_schedule,
@@ -50,6 +60,49 @@ ALT_CAR_SEED = MAIN_CAR_SEED + 1
 _STEP_STARTS_H = np.arange(STEPS_PER_DAY, dtype=float) * STEP_HOURS
 _STEP_ENDS_H = _STEP_STARTS_H + STEP_HOURS
 _VALID_HOLIDAY_REGIONS = {"england", "wales", "scotland", "ni"}
+TRIP_RECORD_COLUMNS = [
+    "ev_id",
+    "person_id",
+    "trip_id",
+    "trip_sequence_id",
+    "simulation_week",
+    "date",
+    "day_of_week",
+    "origin_lsoa",
+    "destination_lsoa",
+    "purpose_original",
+    "purpose_final",
+    "departure_time",
+    "arrival_time",
+    "distance_km",
+    "energy_consumed_kwh",
+    "soc_before_trip",
+    "soc_after_trip",
+    "holiday_week",
+    "is_holiday_modified",
+    "holiday_rule_applied",
+]
+CHARGING_EVENT_COLUMNS = [
+    "ev_id",
+    "person_id",
+    "event_id",
+    "simulation_week",
+    "date",
+    "charging_start_time",
+    "charging_end_time",
+    "charging_lsoa",
+    "home_lsoa",
+    "charging_type",
+    "can_charge",
+    "station_id",
+    "charging_power_kw",
+    "charged_energy_kwh",
+    "soc_before_charging",
+    "soc_after_charging",
+    "reason",
+    "holiday_week",
+]
+CHARGING_EVENT_TYPES = {"home", "public_current_lsoa", "failed_public_charging"}
 
 
 @dataclass
@@ -62,6 +115,7 @@ class CurveRunMetrics:
     private_vehicle_count_before_shard: int = 0
     private_vehicle_count_run: int = 0
     failed_vehicle_count: int = 0
+    sampling_mode: str = "full"
     vehicle_limit: int | None = None
     vehicle_shard_index: int | None = None
     vehicle_shard_count: int | None = None
@@ -71,6 +125,11 @@ class CurveRunMetrics:
     station_metadata_missing_latitude_count: int = 0
     station_metadata_missing_longitude_count: int = 0
     session_count: int = 0
+    trip_record_count: int = 0
+    charging_event_count: int = 0
+    home_charging_event_count: int = 0
+    public_charging_event_count: int = 0
+    failed_public_charging_event_count: int = 0
     bin_row_count: int = 0
     station_curve_row_count: int = 0
     station_summary_row_count: int = 0
@@ -91,7 +150,7 @@ class CurveRunMetrics:
 
     @property
     def is_sample(self) -> bool:
-        return self.vehicle_limit is not None
+        return self.vehicle_limit is not None or self.sampling_mode != "full"
 
     @property
     def is_shard(self) -> bool:
@@ -470,12 +529,96 @@ def _normalise_private_car_ev_fleet(ev_fleet: pd.DataFrame) -> tuple[pd.DataFram
     return result, subtype_values
 
 
+def _small_area_prefix(value: object) -> str:
+    text = str(value).strip()
+    if not text:
+        return "missing"
+    prefix = text[0].upper()
+    return prefix if prefix in {"E", "W", "S", "N"} else "other"
+
+
+def _align_ev_fleet_to_person_order(
+    person_fleet: pd.DataFrame,
+    ev_fleet: pd.DataFrame,
+) -> pd.DataFrame:
+    run_ev_ids = person_fleet["ev_id"].astype(str).tolist()
+    if not run_ev_ids:
+        return ev_fleet.head(0).copy()
+    aligned = ev_fleet.loc[ev_fleet["EV_ID"].astype(str).isin(run_ev_ids)].copy()
+    return aligned.set_index("EV_ID", drop=False).loc[run_ev_ids].reset_index(drop=True)
+
+
+def _sample_country_counts(person_fleet: pd.DataFrame, ev_fleet: pd.DataFrame) -> dict[str, int]:
+    if person_fleet.empty:
+        return {}
+    home = _home_lsoa_map(ev_fleet)
+    prefixes = person_fleet["ev_id"].astype(str).map(lambda ev_id: _small_area_prefix(home.get(ev_id, "")))
+    return {str(key): int(value) for key, value in prefixes.value_counts(sort=False).sort_index().items()}
+
+
+def _select_stratified_private_car_sample(
+    person_fleet: pd.DataFrame,
+    ev_fleet: pd.DataFrame,
+    *,
+    sample_n_per_country: int | None = None,
+    sample_fraction_by_country: float | None = None,
+    sample_seed: int = MAIN_CAR_SEED,
+) -> pd.DataFrame:
+    """Select a deterministic country-prefix-stratified sample from person_fleet."""
+
+    if sample_n_per_country is None and sample_fraction_by_country is None:
+        return person_fleet.copy()
+    if sample_n_per_country is not None and sample_fraction_by_country is not None:
+        raise ValueError("sample_n_per_country and sample_fraction_by_country are mutually exclusive")
+    if sample_n_per_country is not None and int(sample_n_per_country) <= 0:
+        raise ValueError("sample_n_per_country must be positive")
+    if sample_fraction_by_country is not None:
+        fraction = float(sample_fraction_by_country)
+        if not 0.0 < fraction <= 1.0:
+            raise ValueError("sample_fraction_by_country must satisfy 0 < fraction <= 1")
+    else:
+        fraction = None
+
+    home = _home_lsoa_map(ev_fleet)
+    work = person_fleet.copy()
+    work["_country_prefix"] = work["ev_id"].astype(str).map(lambda ev_id: _small_area_prefix(home.get(ev_id, "")))
+    work["_original_position"] = np.arange(len(work), dtype=np.int64)
+
+    rng = np.random.default_rng(sample_seed)
+    selected_positions: list[int] = []
+    for prefix in ["E", "N", "S", "W", "other", "missing"]:
+        positions = work.loc[work["_country_prefix"] == prefix, "_original_position"].to_numpy(dtype=np.int64)
+        if len(positions) == 0:
+            continue
+        if sample_n_per_country is not None:
+            take = min(int(sample_n_per_country), len(positions))
+        else:
+            take = int(math.ceil(len(positions) * float(fraction)))
+        if take <= 0:
+            continue
+        selected = rng.choice(positions, size=take, replace=False)
+        selected_positions.extend(int(value) for value in selected)
+
+    if not selected_positions:
+        return person_fleet.head(0).copy()
+    selected_positions = sorted(selected_positions)
+    return person_fleet.iloc[selected_positions].copy()
+
+
 def load_existing_private_car_data(
     data_dir: Path | str = Path("data"),
     *,
     max_vehicles: int | None = None,
+    sample_n_per_country: int | None = None,
+    sample_fraction_by_country: float | None = None,
+    sample_seed: int = MAIN_CAR_SEED,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """Load existing private-car binding and EV fleet inputs."""
+
+    if max_vehicles is not None and (
+        sample_n_per_country is not None or sample_fraction_by_country is not None
+    ):
+        raise ValueError("max_vehicles cannot be combined with stratified sample options")
 
     data_path = Path(data_dir)
     person_fleet = pd.read_parquet(data_path / "person_fleet.parquet").copy()
@@ -483,24 +626,51 @@ def load_existing_private_car_data(
 
     if "home_lsoa" not in ev_fleet.columns and "LSOA_code" in ev_fleet.columns:
         ev_fleet["home_lsoa"] = ev_fleet["LSOA_code"]
+    ev_fleet, scotland_geo_meta, _ = unify_scotland_ev_home_lsoa_to_dz2022(ev_fleet)
     person_fleet["ev_id"] = _normalise_ev_id_series(person_fleet["ev_id"]).fillna("")
     person_fleet["person_id"] = _normalise_person_id_series(person_fleet["person_id"]).fillna("")
 
     valid_ev_ids = set(ev_fleet["EV_ID"].astype(str))
     person_fleet = person_fleet.loc[person_fleet["ev_id"].isin(valid_ev_ids)].copy()
     available_count = int(len(person_fleet))
+    available_country_counts = _sample_country_counts(person_fleet, ev_fleet)
 
-    if max_vehicles is not None:
+    sample_mode = "full"
+    if sample_n_per_country is not None:
+        person_fleet = _select_stratified_private_car_sample(
+            person_fleet,
+            ev_fleet,
+            sample_n_per_country=int(sample_n_per_country),
+            sample_seed=sample_seed,
+        )
+        sample_mode = "stratified_n_per_country"
+    elif sample_fraction_by_country is not None:
+        person_fleet = _select_stratified_private_car_sample(
+            person_fleet,
+            ev_fleet,
+            sample_fraction_by_country=float(sample_fraction_by_country),
+            sample_seed=sample_seed,
+        )
+        sample_mode = "stratified_fraction_by_country"
+    elif max_vehicles is not None:
         person_fleet = person_fleet.head(int(max_vehicles)).copy()
+        sample_mode = "head"
 
-    run_ev_ids = person_fleet["ev_id"].astype(str).tolist()
-    ev_fleet = ev_fleet.loc[ev_fleet["EV_ID"].isin(run_ev_ids)].copy()
-    ev_fleet = ev_fleet.set_index("EV_ID", drop=False).loc[run_ev_ids].reset_index(drop=True)
+    ev_fleet = _align_ev_fleet_to_person_order(person_fleet, ev_fleet)
+    sample_country_counts = _sample_country_counts(person_fleet, ev_fleet)
 
     metadata = {
         "private_vehicle_count_available": available_count,
         "private_vehicle_count_run": int(len(person_fleet)),
         "vehicle_subtype_values": subtype_values,
+        "available_country_counts": available_country_counts,
+        "sample_country_counts": sample_country_counts,
+        "sampling_mode": sample_mode,
+        "sample_n_per_country": sample_n_per_country,
+        "sample_fraction_by_country": sample_fraction_by_country,
+        "sample_seed": sample_seed,
+        "head_sample_warning": HEAD_SAMPLE_WARNING if sample_mode == "head" else "",
+        "scotland_geography_unification": scotland_geo_meta,
     }
     return person_fleet, ev_fleet, metadata
 
@@ -808,6 +978,153 @@ def _public_station_id(parking_event: ParkingEvent) -> str | None:
     return str(parking_event.matched_station_id)
 
 
+def _simulation_week(schedule: DailySchedule) -> int:
+    return int(schedule.day // 7)
+
+
+def _holiday_week_for_schedule(schedule: DailySchedule, region: str) -> bool:
+    if schedule.date is None:
+        return False
+    week_start = schedule.date - dt.timedelta(days=schedule.date.weekday())
+    return bool(holiday_rules.is_holiday_week(week_start, region))
+
+
+def _nullable_float(value: object) -> float | pd.NA:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return pd.NA
+    if not np.isfinite(numeric):
+        return pd.NA
+    return numeric
+
+
+def _event_timestamp(schedule: DailySchedule, hour_value: float) -> pd.Timestamp | pd.NaT:
+    if schedule.date is None:
+        return pd.NaT
+    return _timestamp_at_hour(schedule.date, hour_value)
+
+
+def build_trip_records_for_ev(
+    ev_id: str,
+    person_id: str,
+    schedules_2025: list[DailySchedule],
+    *,
+    holiday_region: str = "england",
+) -> pd.DataFrame:
+    """Build one EV's trip-level observability rows from simulated schedules."""
+
+    rows: list[dict] = []
+    for schedule in schedules_2025:
+        if schedule.date is None:
+            continue
+        holiday_week = _holiday_week_for_schedule(schedule, holiday_region)
+        for trip_sequence_id, trip in enumerate(schedule.trips):
+            rows.append(
+                {
+                    "ev_id": str(ev_id),
+                    "person_id": str(person_id),
+                    "trip_id": trip.trip_id,
+                    "trip_sequence_id": int(trip_sequence_id),
+                    "simulation_week": _simulation_week(schedule),
+                    "date": schedule.date.isoformat(),
+                    "day_of_week": int(schedule.date.isoweekday()),
+                    "origin_lsoa": trip.origin_lsoa,
+                    "destination_lsoa": trip.destination_lsoa,
+                    # The current holiday model does not preserve original-to-final
+                    # purpose lineage. Keep the field explicit instead of inventing it.
+                    "purpose_original": trip.destination_purpose if not holiday_week else pd.NA,
+                    "purpose_final": trip.destination_purpose,
+                    "departure_time": float(trip.departure_time),
+                    "arrival_time": float(trip.arrival_time),
+                    "distance_km": float(trip.distance_km),
+                    "energy_consumed_kwh": float(trip.energy_consumed_kwh),
+                    "soc_before_trip": _nullable_float(trip.soc_before_trip),
+                    "soc_after_trip": _nullable_float(trip.soc_after_trip),
+                    "holiday_week": bool(holiday_week),
+                    "is_holiday_modified": False if not holiday_week else pd.NA,
+                    "holiday_rule_applied": bool(holiday_week),
+                }
+            )
+
+    return pd.DataFrame(rows, columns=TRIP_RECORD_COLUMNS)
+
+
+def build_charging_event_records_for_ev(
+    ev_id: str,
+    person_id: str,
+    schedules_2025: list[DailySchedule],
+    *,
+    home_lsoa: str,
+    holiday_region: str = "england",
+    energy_epsilon: float = 1e-10,
+) -> pd.DataFrame:
+    """Build one EV's unified home/public/failed charging event rows."""
+
+    rows: list[dict] = []
+    for schedule in schedules_2025:
+        if schedule.date is None:
+            continue
+        holiday_week = _holiday_week_for_schedule(schedule, holiday_region)
+        for event_index, parking_event in enumerate(schedule.parking_events):
+            station_id = _public_station_id(parking_event)
+            charging_lsoa = parking_event.location_lsoa or home_lsoa
+            soc_before = _nullable_float(parking_event.soc_on_arrival)
+            soc_after = _nullable_float(parking_event.soc_on_departure)
+            energy_kwh = max(0.0, float(parking_event.energy_charged_kwh or 0.0))
+
+            charging_type: str | None = None
+            can_charge = bool(parking_event.can_charge)
+            reason = pd.NA
+            start_h = float(parking_event.start_time)
+            end_h = float(parking_event.end_time)
+
+            if parking_event.location_purpose == "home" and can_charge and energy_kwh > energy_epsilon:
+                charging_type = "home"
+            elif station_id is not None and can_charge and energy_kwh > energy_epsilon:
+                charging_type = "public_current_lsoa"
+            elif (
+                parking_event.location_purpose != "home"
+                and not can_charge
+                and not pd.isna(soc_before)
+                and float(soc_before) < (1.0 - energy_epsilon)
+            ):
+                charging_type = "failed_public_charging"
+                reason = "no_public_station_in_current_lsoa"
+                station_id = None
+                energy_kwh = 0.0
+                soc_after = soc_before
+                end_h = start_h
+
+            if charging_type is None:
+                continue
+
+            rows.append(
+                {
+                    "ev_id": str(ev_id),
+                    "person_id": str(person_id),
+                    "event_id": f"{ev_id}_{schedule.date.isoformat()}_pe{event_index:02d}_{charging_type}",
+                    "simulation_week": _simulation_week(schedule),
+                    "date": schedule.date.isoformat(),
+                    "charging_start_time": _event_timestamp(schedule, start_h),
+                    "charging_end_time": _event_timestamp(schedule, end_h),
+                    "charging_lsoa": charging_lsoa,
+                    "home_lsoa": home_lsoa,
+                    "charging_type": charging_type,
+                    "can_charge": bool(can_charge),
+                    "station_id": station_id,
+                    "charging_power_kw": float(parking_event.charge_power_kw or 0.0),
+                    "charged_energy_kwh": energy_kwh,
+                    "soc_before_charging": soc_before,
+                    "soc_after_charging": soc_after,
+                    "reason": reason,
+                    "holiday_week": bool(holiday_week),
+                }
+            )
+
+    return pd.DataFrame(rows, columns=CHARGING_EVENT_COLUMNS)
+
+
 def build_session_time_bins_for_ev(
     ev_id: str,
     schedules_2025: list[DailySchedule],
@@ -950,15 +1267,30 @@ def load_or_build_session_time_bins_15min(
     ev_fleet: pd.DataFrame,
     *,
     year: int,
+    person_fleet: pd.DataFrame | None = None,
     warmup_days: int = WARMUP_DAYS,
-) -> tuple[pd.DataFrame, pd.DataFrame, CurveRunMetrics]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, CurveRunMetrics]:
     """Simulate existing uncontrolled charging and build public station bins."""
 
     ev_lookup = ev_fleet.set_index("EV_ID", drop=False)
     chemistry_available = "chemistry" in ev_fleet.columns
+    home_map = _home_lsoa_map(ev_fleet)
+    if person_fleet is not None and not person_fleet.empty:
+        person_map = dict(zip(person_fleet["ev_id"].astype(str), person_fleet["person_id"].astype(str)))
+        region_map = dict(
+            zip(
+                person_fleet["ev_id"].astype(str),
+                person_fleet["nts_region"].map(_normalise_holiday_region),
+            )
+        )
+    else:
+        person_map = {}
+        region_map = {}
 
     bin_frames: list[pd.DataFrame] = []
     session_frames: list[pd.DataFrame] = []
+    trip_record_frames: list[pd.DataFrame] = []
+    charging_event_frames: list[pd.DataFrame] = []
     metrics = CurveRunMetrics(study_year=year)
 
     for ev_id, schedules in fleet_schedules.items():
@@ -986,10 +1318,29 @@ def load_or_build_session_time_bins_15min(
             schedules_2025,
             load_profile,
         )
+        person_id = person_map.get(str(ev_id), "")
+        holiday_region = region_map.get(str(ev_id), "england")
+        trip_df = build_trip_records_for_ev(
+            str(ev_id),
+            person_id,
+            schedules_2025,
+            holiday_region=holiday_region,
+        )
+        charging_df = build_charging_event_records_for_ev(
+            str(ev_id),
+            person_id,
+            schedules_2025,
+            home_lsoa=home_map.get(str(ev_id), ""),
+            holiday_region=holiday_region,
+        )
         if not bin_df.empty:
             bin_frames.append(bin_df)
         if not session_df.empty:
             session_frames.append(session_df)
+        if not trip_df.empty:
+            trip_record_frames.append(trip_df)
+        if not charging_df.empty:
+            charging_event_frames.append(charging_df)
 
         for key in [
             "invalid_session_time_count",
@@ -1027,13 +1378,32 @@ def load_or_build_session_time_bins_15min(
         if session_frames
         else pd.DataFrame(columns=session_columns)
     )
+    trip_record_result = (
+        pd.concat(trip_record_frames, ignore_index=True)
+        if trip_record_frames
+        else pd.DataFrame(columns=TRIP_RECORD_COLUMNS)
+    )
+    charging_event_result = (
+        pd.concat(charging_event_frames, ignore_index=True)
+        if charging_event_frames
+        else pd.DataFrame(columns=CHARGING_EVENT_COLUMNS)
+    )
     metrics.bin_row_count = int(len(bin_result))
     metrics.session_count = int(len(session_result))
+    metrics.trip_record_count = int(len(trip_record_result))
+    metrics.charging_event_count = int(len(charging_event_result))
+    if not charging_event_result.empty:
+        event_counts = charging_event_result["charging_type"].value_counts()
+        metrics.home_charging_event_count = int(event_counts.get("home", 0))
+        metrics.public_charging_event_count = int(event_counts.get("public_current_lsoa", 0))
+        metrics.failed_public_charging_event_count = int(
+            event_counts.get("failed_public_charging", 0)
+        )
     metrics.public_bin_energy_kwh = float(bin_result["energy_kwh"].sum()) if not bin_result.empty else 0.0
     metrics.public_session_energy_kwh = (
         float(session_result["delivered_energy_kwh"].sum()) if not session_result.empty else 0.0
     )
-    return bin_result, session_result, metrics
+    return bin_result, session_result, trip_record_result, charging_event_result, metrics
 
 
 def aggregate_station_curves_15min(session_bin_df: pd.DataFrame) -> pd.DataFrame:
@@ -1120,13 +1490,25 @@ def _chunk_paths(output_dir: Path, chunk_number: int) -> dict[str, Path]:
         "curve": chunk_dir / f"{prefix}_station_curve.parquet",
         "station_counts": chunk_dir / f"{prefix}_station_counts.parquet",
         "station_day_counts": chunk_dir / f"{prefix}_station_day_counts.parquet",
+        "trip_records": chunk_dir / f"{prefix}_private_car_trip_records.parquet",
+        "charging_events": chunk_dir / f"{prefix}_private_car_charging_events.parquet",
         "metrics": chunk_dir / f"{prefix}_metrics.json",
     }
 
 
 def _chunk_checkpoint_exists(output_dir: Path, chunk_number: int) -> bool:
     paths = _chunk_paths(output_dir, chunk_number)
-    return all(paths[key].exists() for key in ["curve", "station_counts", "station_day_counts", "metrics"])
+    return all(
+        paths[key].exists()
+        for key in [
+            "curve",
+            "station_counts",
+            "station_day_counts",
+            "trip_records",
+            "charging_events",
+            "metrics",
+        ]
+    )
 
 
 def _chunk_count_frame(session_df: pd.DataFrame) -> pd.DataFrame:
@@ -1156,6 +1538,8 @@ def _chunk_metrics_payload(
     station_curve: pd.DataFrame,
     station_counts: pd.DataFrame,
     station_day_counts: pd.DataFrame,
+    trip_records: pd.DataFrame,
+    charging_events: pd.DataFrame,
 ) -> dict:
     return {
         "chunk_number": int(chunk_number),
@@ -1169,6 +1553,23 @@ def _chunk_metrics_payload(
         "missing_station_id_count": int(chunk_metrics.missing_station_id_count),
         "bin_row_count": int(chunk_metrics.bin_row_count),
         "session_count": int(chunk_metrics.session_count),
+        "trip_record_count": int(len(trip_records)),
+        "charging_event_count": int(len(charging_events)),
+        "home_charging_event_count": int(
+            (charging_events["charging_type"] == "home").sum()
+        )
+        if not charging_events.empty
+        else 0,
+        "public_charging_event_count": int(
+            (charging_events["charging_type"] == "public_current_lsoa").sum()
+        )
+        if not charging_events.empty
+        else 0,
+        "failed_public_charging_event_count": int(
+            (charging_events["charging_type"] == "failed_public_charging").sum()
+        )
+        if not charging_events.empty
+        else 0,
         "public_bin_energy_kwh": float(chunk_metrics.public_bin_energy_kwh),
         "public_session_energy_kwh": float(chunk_metrics.public_session_energy_kwh),
         "station_curve_row_count": int(len(station_curve)),
@@ -1188,12 +1589,16 @@ def _write_chunk_checkpoint(
     station_curve: pd.DataFrame,
     station_counts: pd.DataFrame,
     station_day_counts: pd.DataFrame,
+    trip_records: pd.DataFrame,
+    charging_events: pd.DataFrame,
 ) -> None:
     paths = _chunk_paths(output_dir, chunk_number)
     paths["dir"].mkdir(parents=True, exist_ok=True)
     station_curve.to_parquet(paths["curve"], index=False)
     station_counts.to_parquet(paths["station_counts"], index=False)
     station_day_counts.to_parquet(paths["station_day_counts"], index=False)
+    trip_records.to_parquet(paths["trip_records"], index=False)
+    charging_events.to_parquet(paths["charging_events"], index=False)
     payload = _chunk_metrics_payload(
         chunk_number=chunk_number,
         total_chunks=total_chunks,
@@ -1202,17 +1607,24 @@ def _write_chunk_checkpoint(
         station_curve=station_curve,
         station_counts=station_counts,
         station_day_counts=station_day_counts,
+        trip_records=trip_records,
+        charging_events=charging_events,
     )
     paths["metrics"].write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
 
-def _read_chunk_checkpoint(output_dir: Path, chunk_number: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
+def _read_chunk_checkpoint(
+    output_dir: Path,
+    chunk_number: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     paths = _chunk_paths(output_dir, chunk_number)
     payload = json.loads(paths["metrics"].read_text(encoding="utf-8"))
     return (
         pd.read_parquet(paths["curve"]),
         pd.read_parquet(paths["station_counts"]),
         pd.read_parquet(paths["station_day_counts"]),
+        pd.read_parquet(paths["trip_records"]),
+        pd.read_parquet(paths["charging_events"]),
         payload,
     )
 
@@ -1226,6 +1638,11 @@ def _accumulate_chunk_metrics(metrics: CurveRunMetrics, payload: Mapping[str, ob
         "missing_station_id_count",
         "bin_row_count",
         "session_count",
+        "trip_record_count",
+        "charging_event_count",
+        "home_charging_event_count",
+        "public_charging_event_count",
+        "failed_public_charging_event_count",
     ]:
         setattr(metrics, key, getattr(metrics, key) + int(payload.get(key, 0) or 0))
     metrics.public_bin_energy_kwh += float(payload.get("public_bin_energy_kwh", 0.0) or 0.0)
@@ -1881,16 +2298,33 @@ def run_preflight_referential_integrity_check(
     *,
     data_dir: Path | str = Path("data"),
     output_dir: Path | str = Path("outputs/privatecar_charging_curves_2025_preflight"),
+    destination_table_path: Path | str | None = None,
+    destination_cache_mode: str = "origin",
     year: int = 2025,
     sample_size: int = 20,
     top_n: int = 20,
+    fail_on_geography_mismatch: bool = True,
 ) -> dict:
-    """Run the full private-car person_id vs person_week_library integrity check."""
+    """Run private-car referential and small-area geography preflight checks."""
 
     data_path = Path(data_dir)
+    destination_path = (
+        Path(destination_table_path)
+        if destination_table_path is not None
+        else Path(__file__).resolve().parents[3]
+        / "Data"
+        / "Charging_stations"
+        / "OSM_POI_Labeling"
+        / "destination_choice_table.parquet"
+    )
     person_fleet = pd.read_parquet(data_path / "person_fleet.parquet")
     library_df = pd.read_parquet(data_path / "person_week_library.parquet", columns=["person_id"])
-    ev_fleet = load_ev_fleet(data_path)
+    ev_fleet, _ = _normalise_private_car_ev_fleet(load_ev_fleet(data_path))
+    if "home_lsoa" not in ev_fleet.columns and "LSOA_code" in ev_fleet.columns:
+        ev_fleet["home_lsoa"] = ev_fleet["LSOA_code"]
+    ev_fleet, scotland_geo_meta, scotland_crosswalk = unify_scotland_ev_home_lsoa_to_dz2022(
+        ev_fleet
+    )
     report = build_privatecar_person_week_integrity_report(
         person_fleet,
         library_df,
@@ -1900,6 +2334,36 @@ def run_preflight_referential_integrity_check(
         top_n=top_n,
     )
     write_preflight_referential_integrity_outputs(report, output_dir, year=year)
+    stations = pd.read_csv(data_path / "UK_OCM_stations_labeled.csv")
+    centroids = load_lsoa_centroids()
+    geography_report = build_privatecar_geography_preflight_report(
+        ev_fleet=ev_fleet,
+        stations=stations,
+        centroids=centroids,
+        destination_table_path=destination_path,
+        attractiveness_path=destination_path.parent / "lsoa_scene_attractiveness.parquet",
+        source_paths={
+            "ev_allocation": data_path / "EV_UK_LSOA_2025_with_energy.csv",
+            "person_fleet": data_path / "person_fleet.parquet",
+            "stations": data_path / "UK_OCM_stations_labeled.csv",
+            "destination_choice_table": destination_path,
+            "lsoa_scene_attractiveness": destination_path.parent / "lsoa_scene_attractiveness.parquet",
+            "centroids": "mobility.core.spatial.load_lsoa_centroids()",
+        },
+        sampling_context={
+            "sampling_mode": "full",
+            "destination_cache_mode": destination_cache_mode,
+        },
+        geography_context=scotland_geo_meta,
+    )
+    geography_report["scotland_crosswalk"] = scotland_crosswalk
+    report["geography"] = geography_report
+    write_preflight_geography_outputs(geography_report, output_dir, year=year, append_markdown=True)
+    if fail_on_geography_mismatch:
+        raise_for_geography_preflight(
+            geography_report,
+            report_path=Path(output_dir) / "data_quality_report.md",
+        )
     return report
 
 
@@ -2191,6 +2655,8 @@ def export_analysis_files(
     year: int,
     station_counts: pd.DataFrame | None = None,
     station_day_counts: pd.DataFrame | None = None,
+    trip_records: pd.DataFrame | None = None,
+    charging_events: pd.DataFrame | None = None,
 ) -> None:
     """Write parquet/csv analysis outputs and station metadata JSON."""
 
@@ -2207,6 +2673,16 @@ def export_analysis_files(
         station_counts.to_parquet(out / f"station_counts_{year}.parquet", index=False)
     if station_day_counts is not None:
         station_day_counts.to_parquet(out / f"station_day_counts_{year}.parquet", index=False)
+    if trip_records is not None:
+        trip_records.to_parquet(out / "private_car_trip_records.parquet", index=False)
+    if charging_events is not None:
+        charging_events.to_parquet(out / "private_car_charging_events.parquet", index=False)
+        failed_events = charging_events.loc[
+            charging_events["charging_type"] == "failed_public_charging"
+        ].copy()
+        home_events = charging_events.loc[charging_events["charging_type"] == "home"].copy()
+        failed_events.to_parquet(out / "private_car_failed_charging_events.parquet", index=False)
+        home_events.to_parquet(out / "private_car_home_charging_events.parquet", index=False)
 
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -2238,6 +2714,7 @@ def write_data_quality_report(
     station_summary: pd.DataFrame,
     year: int,
     preflight_report: Mapping | None = None,
+    geography_preflight_report: Mapping | None = None,
 ) -> None:
     """Write a markdown data quality and reuse report."""
 
@@ -2280,6 +2757,7 @@ def write_data_quality_report(
             f"- private vehicles before shard: `{metrics.private_vehicle_count_before_shard}`",
             f"- private vehicles processed in this run: `{metrics.private_vehicle_count_run}`",
             f"- failed vehicles: `{metrics.failed_vehicle_count}`",
+            f"- sampling mode: `{metrics.sampling_mode}`",
             f"- sample run: `{_markdown_bool(metrics.is_sample)}`",
             f"- vehicle shard: `{metrics.vehicle_shard_index if metrics.is_shard else 'none'}` / `{metrics.vehicle_shard_count if metrics.is_shard else 'none'}`",
             f"- partial shard run: `{_markdown_bool(metrics.is_shard)}`",
@@ -2315,6 +2793,8 @@ def write_data_quality_report(
             f"- vehicle_id missing in processed person_fleet: checked during load; processed count `{metrics.private_vehicle_count_run}`.",
             "- non-private vehicle exclusion: EV fleet `vehicle_subtype` is filtered to car/private-car values when present.",
             "- home charging events have no public `station_id` in the existing model and are not exported as station curves.",
+            "- private-car trip records are written to `private_car_trip_records.parquet`.",
+            "- unified charging events are written to `private_car_charging_events.parquet`.",
         "",
         ]
     )
@@ -2322,12 +2802,20 @@ def write_data_quality_report(
     if preflight_report is not None:
         lines.extend(_preflight_markdown_lines(preflight_report, year=year))
         lines.append("")
+    if geography_preflight_report is not None:
+        lines.extend(geography_preflight_markdown_lines(geography_preflight_report, year=year))
+        lines.append("")
 
     lines.extend(
         [
             "## Charging Session Checks",
             "",
             f"- sessions with station load: `{metrics.session_count}`",
+            f"- trip records exported: `{metrics.trip_record_count}`",
+            f"- charging events exported: `{metrics.charging_event_count}`",
+            f"- home charging events exported: `{metrics.home_charging_event_count}`",
+            f"- public current-LSOA charging events exported: `{metrics.public_charging_event_count}`",
+            f"- failed public charging events exported: `{metrics.failed_public_charging_event_count}`",
             f"- invalid session time count: `{metrics.invalid_session_time_count}`",
             f"- negative session energy count: `{metrics.negative_session_energy_count}`",
             f"- negative charging power count: `{metrics.negative_power_count}`",
@@ -2409,6 +2897,9 @@ def run_privatecar_station_curve_pipeline(
     destination_cache_mode: str = "origin",
     year: int = 2025,
     max_vehicles: int | None = None,
+    sample_n_per_country: int | None = None,
+    sample_fraction_by_country: float | None = None,
+    sample_seed: int = MAIN_CAR_SEED,
     vehicle_shard_index: int | None = None,
     vehicle_shard_count: int | None = None,
     chunk_size: int = 100,
@@ -2462,6 +2953,9 @@ def run_privatecar_station_curve_pipeline(
     person_fleet, ev_fleet, private_meta = load_existing_private_car_data(
         data_path,
         max_vehicles=max_vehicles,
+        sample_n_per_country=sample_n_per_country,
+        sample_fraction_by_country=sample_fraction_by_country,
+        sample_seed=sample_seed,
     )
     private_meta["private_vehicle_count_before_shard"] = int(len(person_fleet))
     _record_profile(
@@ -2473,6 +2967,9 @@ def run_privatecar_station_curve_pipeline(
         details={
             "private_vehicle_count_available": int(private_meta["private_vehicle_count_available"]),
             "max_vehicles": max_vehicles,
+            "sampling_mode": private_meta.get("sampling_mode"),
+            "sample_country_counts": private_meta.get("sample_country_counts"),
+            "scotland_geography_unification": private_meta.get("scotland_geography_unification"),
         },
     )
     if vehicle_shard_count is not None:
@@ -2535,6 +3032,62 @@ def run_privatecar_station_curve_pipeline(
         vehicle_count=int(len(person_fleet)),
         details=preflight_report["summary"],
     )
+
+    phase_start = time.perf_counter()
+    geography_ev_fleet, _ = _normalise_private_car_ev_fleet(load_ev_fleet(data_path))
+    if "home_lsoa" not in geography_ev_fleet.columns and "LSOA_code" in geography_ev_fleet.columns:
+        geography_ev_fleet["home_lsoa"] = geography_ev_fleet["LSOA_code"]
+    geography_ev_fleet, scotland_geo_meta, scotland_crosswalk = unify_scotland_ev_home_lsoa_to_dz2022(
+        geography_ev_fleet
+    )
+    private_meta["scotland_geography_unification"] = scotland_geo_meta
+    geography_report = build_privatecar_geography_preflight_report(
+        ev_fleet=geography_ev_fleet,
+        stations=stations_raw,
+        centroids=centroids,
+        destination_table_path=destination_path,
+        attractiveness_path=destination_path.parent / "lsoa_scene_attractiveness.parquet",
+        source_paths={
+            "ev_allocation": data_path / "EV_UK_LSOA_2025_with_energy.csv",
+            "person_fleet": data_path / "person_fleet.parquet",
+            "stations": data_path / "UK_OCM_stations_labeled.csv",
+            "destination_choice_table": destination_path,
+            "lsoa_scene_attractiveness": destination_path.parent / "lsoa_scene_attractiveness.parquet",
+            "centroids": "mobility.core.spatial.load_lsoa_centroids()",
+        },
+        sampling_context={
+            "sampling_mode": private_meta.get("sampling_mode", "full"),
+            "max_vehicles": max_vehicles,
+            "sample_n_per_country": sample_n_per_country,
+            "sample_fraction_by_country": sample_fraction_by_country,
+            "sample_seed": sample_seed,
+            "sample_country_counts": private_meta.get("sample_country_counts"),
+            "available_country_counts": private_meta.get("available_country_counts"),
+        },
+        geography_context=scotland_geo_meta,
+    )
+    geography_report["scotland_crosswalk"] = scotland_crosswalk
+    preflight_report["geography"] = geography_report
+    write_preflight_geography_outputs(
+        geography_report,
+        out,
+        year=year,
+        append_markdown=True,
+    )
+    _record_profile(
+        profile_rows,
+        run_start_perf=run_start_perf,
+        phase_start_perf=phase_start,
+        phase="preflight_geography_consistency_check",
+        vehicle_count=int(private_meta["private_vehicle_count_available"]),
+        details=geography_report["summary"],
+    )
+    if geography_report["summary"].get("fail_fast"):
+        _write_profile_log(out, profile_rows, year=year)
+        raise_for_geography_preflight(
+            geography_report,
+            report_path=out / "data_quality_report.md",
+        )
 
     phase_start = time.perf_counter()
     library_index = build_library_index(library_df)
@@ -2603,6 +3156,7 @@ def run_privatecar_station_curve_pipeline(
         ),
         private_vehicle_count_run=int(len(person_fleet)),
         failed_vehicle_count=len(failed_vehicle_rows),
+        sampling_mode=str(private_meta.get("sampling_mode", "full")),
         vehicle_limit=max_vehicles,
         vehicle_shard_index=vehicle_shard_index,
         vehicle_shard_count=vehicle_shard_count,
@@ -2616,6 +3170,8 @@ def run_privatecar_station_curve_pipeline(
     curve_frames: list[pd.DataFrame] = []
     station_count_frames: list[pd.DataFrame] = []
     station_day_count_frames: list[pd.DataFrame] = []
+    trip_record_frames: list[pd.DataFrame] = []
+    charging_event_frames: list[pd.DataFrame] = []
 
     total_chunks = math.ceil(len(person_fleet) / chunk_size)
     for chunk_number, person_chunk in enumerate(_chunk_frame(person_fleet, chunk_size), start=1):
@@ -2629,13 +3185,24 @@ def run_privatecar_station_curve_pipeline(
         chunk_start = time.perf_counter()
         if resume and checkpoint_chunks and _chunk_checkpoint_exists(out, chunk_number):
             phase_start = time.perf_counter()
-            curve, station_counts_chunk, station_day_counts_chunk, payload = _read_chunk_checkpoint(out, chunk_number)
+            (
+                curve,
+                station_counts_chunk,
+                station_day_counts_chunk,
+                trip_records_chunk,
+                charging_events_chunk,
+                payload,
+            ) = _read_chunk_checkpoint(out, chunk_number)
             if not curve.empty:
                 curve_frames.append(curve)
             if not station_counts_chunk.empty:
                 station_count_frames.append(station_counts_chunk)
             if not station_day_counts_chunk.empty:
                 station_day_count_frames.append(station_day_counts_chunk)
+            if not trip_records_chunk.empty:
+                trip_record_frames.append(trip_records_chunk)
+            if not charging_events_chunk.empty:
+                charging_event_frames.append(charging_events_chunk)
             _accumulate_chunk_metrics(metrics, payload)
             _record_profile(
                 profile_rows,
@@ -2649,6 +3216,8 @@ def run_privatecar_station_curve_pipeline(
                     "station_curve_rows": len(curve),
                     "station_count_rows": len(station_counts_chunk),
                     "station_day_count_rows": len(station_day_counts_chunk),
+                    "trip_record_rows": len(trip_records_chunk),
+                    "charging_event_rows": len(charging_events_chunk),
                 },
             )
             _record_profile(
@@ -2744,10 +3313,17 @@ def run_privatecar_station_curve_pipeline(
         )
 
         phase_start = time.perf_counter()
-        bin_df, session_df, chunk_metrics = load_or_build_session_time_bins_15min(
+        (
+            bin_df,
+            session_df,
+            trip_records_chunk,
+            charging_events_chunk,
+            chunk_metrics,
+        ) = load_or_build_session_time_bins_15min(
             schedules,
             ev_chunk,
             year=year,
+            person_fleet=person_chunk,
         )
         _record_profile(
             profile_rows,
@@ -2760,6 +3336,8 @@ def run_privatecar_station_curve_pipeline(
             details={
                 "session_bin_rows": len(bin_df),
                 "session_rows": len(session_df),
+                "trip_record_rows": len(trip_records_chunk),
+                "charging_event_rows": len(charging_events_chunk),
                 "public_bin_energy_kwh": round(chunk_metrics.public_bin_energy_kwh, 6),
             },
         )
@@ -2774,6 +3352,10 @@ def run_privatecar_station_curve_pipeline(
             station_count_frames.append(station_counts_chunk)
         if not station_day_counts_chunk.empty:
             station_day_count_frames.append(station_day_counts_chunk)
+        if not trip_records_chunk.empty:
+            trip_record_frames.append(trip_records_chunk)
+        if not charging_events_chunk.empty:
+            charging_event_frames.append(charging_events_chunk)
         payload = _chunk_metrics_payload(
             chunk_number=chunk_number,
             total_chunks=total_chunks,
@@ -2782,6 +3364,8 @@ def run_privatecar_station_curve_pipeline(
             station_curve=curve,
             station_counts=station_counts_chunk,
             station_day_counts=station_day_counts_chunk,
+            trip_records=trip_records_chunk,
+            charging_events=charging_events_chunk,
         )
         _accumulate_chunk_metrics(metrics, payload)
         _record_profile(
@@ -2808,6 +3392,8 @@ def run_privatecar_station_curve_pipeline(
                 station_curve=curve,
                 station_counts=station_counts_chunk,
                 station_day_counts=station_day_counts_chunk,
+                trip_records=trip_records_chunk,
+                charging_events=charging_events_chunk,
             )
             _record_profile(
                 profile_rows,
@@ -2821,6 +3407,8 @@ def run_privatecar_station_curve_pipeline(
                     "station_curve_rows": len(curve),
                     "station_count_rows": len(station_counts_chunk),
                     "station_day_count_rows": len(station_day_counts_chunk),
+                    "trip_record_rows": len(trip_records_chunk),
+                    "charging_event_rows": len(charging_events_chunk),
                 },
             )
         _record_profile(
@@ -2837,6 +3425,16 @@ def run_privatecar_station_curve_pipeline(
     station_curve = _combine_station_curves(curve_frames)
     station_counts = _combine_count_frames(station_count_frames, ["station_id"])
     station_day_counts = _combine_count_frames(station_day_count_frames, ["station_id", "date"])
+    trip_records = (
+        pd.concat(trip_record_frames, ignore_index=True)
+        if trip_record_frames
+        else pd.DataFrame(columns=TRIP_RECORD_COLUMNS)
+    )
+    charging_events = (
+        pd.concat(charging_event_frames, ignore_index=True)
+        if charging_event_frames
+        else pd.DataFrame(columns=CHARGING_EVENT_COLUMNS)
+    )
     _record_profile(
         profile_rows,
         run_start_perf=run_start_perf,
@@ -2846,6 +3444,8 @@ def run_privatecar_station_curve_pipeline(
             "station_curve_rows": len(station_curve),
             "station_count_rows": len(station_counts),
             "station_day_count_rows": len(station_day_counts),
+            "trip_record_rows": len(trip_records),
+            "charging_event_rows": len(charging_events),
         },
     )
 
@@ -2866,6 +3466,15 @@ def run_privatecar_station_curve_pipeline(
 
     metrics.station_curve_row_count = int(len(station_curve))
     metrics.station_summary_row_count = int(len(station_summary))
+    metrics.trip_record_count = int(len(trip_records))
+    metrics.charging_event_count = int(len(charging_events))
+    if not charging_events.empty:
+        event_counts = charging_events["charging_type"].value_counts()
+        metrics.home_charging_event_count = int(event_counts.get("home", 0))
+        metrics.public_charging_event_count = int(event_counts.get("public_current_lsoa", 0))
+        metrics.failed_public_charging_event_count = int(
+            event_counts.get("failed_public_charging", 0)
+        )
     metrics.station_curve_energy_kwh = float(station_curve["energy_kwh"].sum()) if not station_curve.empty else 0.0
     metrics.station_date_count = (
         int(station_curve.loc[:, ["station_id", "date"]].drop_duplicates().shape[0])
@@ -2887,13 +3496,20 @@ def run_privatecar_station_curve_pipeline(
         year=year,
         station_counts=station_counts,
         station_day_counts=station_day_counts,
+        trip_records=trip_records,
+        charging_events=charging_events,
     )
     _record_profile(
         profile_rows,
         run_start_perf=run_start_perf,
         phase_start_perf=phase_start,
         phase="export_analysis_files",
-        details={"station_curve_rows": len(station_curve), "station_summary_rows": len(station_summary)},
+        details={
+            "station_curve_rows": len(station_curve),
+            "station_summary_rows": len(station_summary),
+            "trip_record_rows": len(trip_records),
+            "charging_event_rows": len(charging_events),
+        },
     )
     if write_web_json:
         phase_start = time.perf_counter()
@@ -2926,9 +3542,29 @@ def run_privatecar_station_curve_pipeline(
             details=web_metrics,
         )
 
-    if metrics.is_sample:
+    if metrics.vehicle_limit is not None:
         metrics.notes.append(
             f"This run used --max-vehicles={max_vehicles}; outputs are a smoke/sample export, not the full private-car fleet."
+        )
+    elif metrics.is_sample:
+        metrics.notes.append(
+            "This run used a stratified sample; outputs are a smoke/sample export, not the full private-car fleet."
+        )
+    if private_meta.get("sampling_mode") == "head":
+        metrics.notes.append(HEAD_SAMPLE_WARNING)
+    elif private_meta.get("sampling_mode") == "stratified_n_per_country":
+        metrics.notes.append(
+            f"This run used --sample-n-per-country={sample_n_per_country}; country-prefix counts are {private_meta.get('sample_country_counts')}."
+        )
+    elif private_meta.get("sampling_mode") == "stratified_fraction_by_country":
+        metrics.notes.append(
+            f"This run used --sample-fraction-by-country={sample_fraction_by_country}; country-prefix counts are {private_meta.get('sample_country_counts')}."
+        )
+    scotland_geo_meta = dict(private_meta.get("scotland_geography_unification") or {})
+    if scotland_geo_meta.get("applied"):
+        metrics.notes.append(
+            "Scotland EV home_lsoa was unified from Data Zone 2011 to Data Zone 2022 "
+            f"using {scotland_geo_meta.get('method')}."
         )
     if metrics.is_shard:
         metrics.notes.append(
@@ -2951,6 +3587,7 @@ def run_privatecar_station_curve_pipeline(
         station_summary=station_summary,
         year=year,
         preflight_report=preflight_report,
+        geography_preflight_report=geography_report,
     )
     _record_profile(
         profile_rows,
@@ -2975,6 +3612,8 @@ def run_privatecar_station_curve_pipeline(
         "station_summary": station_summary,
         "station_metadata": station_metadata,
         "station_day_counts": station_day_counts,
+        "private_car_trip_records": trip_records,
+        "private_car_charging_events": charging_events,
         "metrics": metrics,
         "profile": pd.DataFrame(profile_rows),
         "schedule_profile": pd.DataFrame(vehicle_schedule_profile_rows),

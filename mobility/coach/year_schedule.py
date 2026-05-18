@@ -94,6 +94,7 @@ def _attach_chain_parking(
     allow_layover_charging: bool,
     layover_charge_kw: float,
     min_layover_for_charging_h: float,
+    eligible_layover_lsoas: set[str] | None = None,
 ) -> None:
     trips = sorted(schedule.trips, key=lambda trip: (trip.departure_time, trip.arrival_time, trip.trip_id))
     schedule.trips = trips
@@ -125,9 +126,11 @@ def _attach_chain_parking(
     for left, right in zip(trips[:-1], trips[1:]):
         duration_h = float(right.departure_time) - float(left.arrival_time)
         location_lsoa = str(getattr(left, "destination_lsoa", "") or "")
+        is_lsoa_eligible = eligible_layover_lsoas is None or location_lsoa in eligible_layover_lsoas
         can_charge = bool(
             allow_layover_charging
             and duration_h >= float(min_layover_for_charging_h)
+            and is_lsoa_eligible
         )
         dwell = _event(
             float(left.arrival_time),
@@ -164,6 +167,7 @@ def chain_to_year_schedules(
     allow_layover_charging: bool = False,
     layover_charge_kw: float = 0.0,
     min_layover_for_charging_h: float = 0.0,
+    eligible_layover_lsoas: set[str] | None = None,
 ) -> list[DailySchedule]:
     """Expand one synthetic coach chain across the coach feed year."""
     if pre_journey_dwell_h < 0.0:
@@ -183,6 +187,11 @@ def chain_to_year_schedules(
         for date, index in date_to_index.items()
     }
     active_date_set = {_coerce_date(value) for value in active_dates}
+    eligible_set = (
+        {str(value) for value in eligible_layover_lsoas if str(value)}
+        if eligible_layover_lsoas is not None
+        else None
+    )
     ordered = _ordered_journeys(chain_journeys)
 
     empty_stops = pd.DataFrame(columns=["stop_sequence", "stop_point_ref"])
@@ -225,6 +234,7 @@ def chain_to_year_schedules(
                 allow_layover_charging=allow_layover_charging,
                 layover_charge_kw=layover_charge_kw,
                 min_layover_for_charging_h=min_layover_for_charging_h,
+                eligible_layover_lsoas=eligible_set,
             )
         schedule.metadata = {
             "chain_id": chain_id,

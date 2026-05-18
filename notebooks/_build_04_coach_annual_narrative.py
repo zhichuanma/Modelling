@@ -135,18 +135,17 @@ cells.append(
                 prepared.to_parquet(SMOKE_JOURNEYS_PATH, index=False)
                 stop_subset.to_parquet(SMOKE_STOPS_PATH, index=False)
 
-            if not COACH_ANNUAL_SMOKE_PER_CHAIN_PATH.exists() or not COACH_ANNUAL_SMOKE_LOAD_PROFILE_PATH.exists():
-                run_pipeline(
-                    journeys_parquet=SMOKE_JOURNEYS_PATH,
-                    stop_sequences_parquet=SMOKE_STOPS_PATH,
-                    fleet_path=COACH_FLEET_PATH,
-                    per_chain_out=COACH_ANNUAL_SMOKE_PER_CHAIN_PATH,
-                    load_profile_out=COACH_ANNUAL_SMOKE_LOAD_PROFILE_PATH,
-                    seed=MAIN_COACH_ANNUAL_SEED,
-                    warm_up_days=WARM_UP_DAYS_SMOKE,
-                    limit=CHAIN_LIMIT,
-                    n_workers=1,
-                )
+            run_pipeline(
+                journeys_parquet=SMOKE_JOURNEYS_PATH,
+                stop_sequences_parquet=SMOKE_STOPS_PATH,
+                fleet_path=COACH_FLEET_PATH,
+                per_chain_out=COACH_ANNUAL_SMOKE_PER_CHAIN_PATH,
+                load_profile_out=COACH_ANNUAL_SMOKE_LOAD_PROFILE_PATH,
+                seed=MAIN_COACH_ANNUAL_SEED,
+                warm_up_days=WARM_UP_DAYS_SMOKE,
+                limit=CHAIN_LIMIT,
+                n_workers=1,
+            )
 
 
         ensure_smoke_outputs()
@@ -294,7 +293,7 @@ cells.append(
         """
         ## B.5 充电逻辑
 
-        本段解释 coach 版本的最小物理递推：$SOC_{t+1} = \\mathrm{clip}\\left[SOC_t - \\frac{E_{journey,t}}{B} + \\frac{P_{park,t} \\cdot \\Delta t}{B},\\ 0,\\ 1\\right]$。`terminus_charge_kw` 表示车辆回到一个能慢充的 `depot_terminus`；同一天 trip 之间是 `layover`，默认不充电。
+        本段解释 coach 版本的最小物理递推：$SOC_{t+1} = \\mathrm{clip}\\left[SOC_t - \\frac{E_{journey,t}}{B} + \\frac{P_{park,t} \\cdot \\Delta t}{B},\\ 0,\\ 1\\right]$。`terminus_charge_kw` 表示车辆回到一个能慢充的 `depot_terminus`；同一天 trip 之间是 `layover`，默认不充电。公共 OCM eligible layover retry 是 CLI opt-in，不改变 baseline smoke run。
         """
     )
 )
@@ -526,11 +525,12 @@ cells.append(
                 ("chain assignment is heuristic", "coach_chain_id comes from first-fit by start_h, not real operator blocking"),
                 ("LSOA attribution = mode(end_lsoa)", "home LSOA is post-hoc mode over chain end_lsoa values"),
                 ("terminus capacity synthesized", "terminus_total_kw is summed from simulated chain charger ratings"),
-                ("no public charger", "OCM/public charging supply is not included in E.5"),
+                ("no public charger in baseline", "OCM/public charging supply is not included in E.5 baseline"),
                 ("no utilization", "ceiling_kwh_year = terminus_total_kw * 8760, with no utilisation coefficient"),
                 ("no operator real blocking", "no CPT/DfT/operator roster data are used"),
                 ("warm_up_days=0 is smoke-only", f"production annual runs should use WARMUP_DAYS={WARMUP_DAYS}"),
                 ("Layover charging policy", "off by default; opt-in at OCM-eligible LSOAs"),
+                ("Retry pass", "two-pass when --enable-eligible-layover-retry is set; pass 1 layover-off, pass 2 only at chain LSOAs with Rapid+ OCM public stations"),
                 ("feed-year only", f"date window is {COACH_FEED_YEAR_START} to {COACH_FEED_YEAR_END}"),
             ],
             columns=["label", "meaning"],

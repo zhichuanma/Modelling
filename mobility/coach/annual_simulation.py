@@ -178,6 +178,7 @@ def simulate_coach_chain_year(
     allow_layover_charging: bool = False,
     layover_charge_kw: float = 0.0,
     min_layover_for_charging_h: float = 0.0,
+    eligible_layover_lsoas: set[str] | None = None,
 ) -> dict:
     """Simulate one synthetic coach chain across the coach feed year."""
     if chain_journeys.empty:
@@ -202,6 +203,7 @@ def simulate_coach_chain_year(
         allow_layover_charging=allow_layover_charging,
         layover_charge_kw=layover_charge_kw,
         min_layover_for_charging_h=min_layover_for_charging_h,
+        eligible_layover_lsoas=eligible_layover_lsoas,
     )
     for schedule in schedules:
         schedule.ev_id = str(chain_id)
@@ -310,6 +312,7 @@ def simulate_coach_fleet_year(
     allow_layover_charging: bool = False,
     layover_charge_kw: float = 0.0,
     min_layover_for_charging_h: float = 0.0,
+    eligible_layover_lsoas: set[str] | None = None,
     **kw,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Simulate a synthetic coach chain fleet and return metrics plus load rows."""
@@ -330,6 +333,10 @@ def simulate_coach_fleet_year(
                 "soc_floor_hit_h_min",
                 "feasible",
                 "infeasibility_reasons",
+                "retry_used",
+                "retry_reason",
+                "pass1_feasible",
+                "eligible_layover_lsoa_count",
             ]
         ), pd.DataFrame(columns=["chain_id", "date", "step", "hour", "load_kw"])
 
@@ -342,16 +349,29 @@ def simulate_coach_fleet_year(
         template = _chain_template(group, journeys_df, chain_id=str(chain_id))
         active_dates = sorted({_coerce_date(value) for value in group["date"]})
         try:
-            result = simulate_coach_chain_year(
-                str(chain_id),
-                template,
-                ev_spec,
-                active_dates,
-                allow_layover_charging=allow_layover_charging,
-                layover_charge_kw=layover_charge_kw,
-                min_layover_for_charging_h=min_layover_for_charging_h,
+            call_kwargs = {
+                "allow_layover_charging": allow_layover_charging,
+                "layover_charge_kw": layover_charge_kw,
+                "min_layover_for_charging_h": min_layover_for_charging_h,
                 **kw,
-            )
+            }
+            if eligible_layover_lsoas is None:
+                result = simulate_coach_chain_year(
+                    str(chain_id),
+                    template,
+                    ev_spec,
+                    active_dates,
+                    **call_kwargs,
+                )
+            else:
+                result = simulate_coach_chain_year_with_retry(
+                    str(chain_id),
+                    template,
+                    ev_spec,
+                    active_dates,
+                    eligible_layover_lsoas=eligible_layover_lsoas,
+                    **call_kwargs,
+                )
             load_frames.append(_load_profile_frame(str(chain_id), result["load_kw"]))
             record = {
                 "chain_id": str(chain_id),
@@ -374,6 +394,10 @@ def simulate_coach_fleet_year(
                 "infeasibility_reasons": ",".join(result["infeasibility_reasons"]),
                 "battery_kwh": result["battery_kwh"],
                 "consumption_kwh_per_km": result["consumption_kwh_per_km"],
+                "retry_used": bool(result.get("retry_used", False)),
+                "retry_reason": str(result.get("retry_reason", "")),
+                "pass1_feasible": result.get("pass1_feasible", np.nan),
+                "eligible_layover_lsoa_count": int(len(result.get("eligible_layover_lsoas", []))),
                 "simulation_error": "",
             }
         except Exception as exc:  # noqa: BLE001 - annual smoke should keep moving
@@ -394,6 +418,10 @@ def simulate_coach_fleet_year(
                 "infeasibility_reasons": "simulation_error",
                 "battery_kwh": _battery_kwh(ev_spec),
                 "consumption_kwh_per_km": _consumption_kwh_per_km(ev_spec),
+                "retry_used": False,
+                "retry_reason": "",
+                "pass1_feasible": np.nan,
+                "eligible_layover_lsoa_count": 0,
                 "simulation_error": str(exc),
             }
         records.append(record)
@@ -407,4 +435,73 @@ def simulate_coach_fleet_year(
     return per_chain, load_profile
 
 
-__all__ = ["simulate_coach_chain_year", "simulate_coach_fleet_year"]
+def simulate_coach_chain_year_with_retry(
+    chain_id: str,
+    chain_journeys: pd.DataFrame,
+    ev_spec,
+    active_dates,
+    *,
+    eligible_layover_lsoas: set[str] | None = None,
+    layover_charge_kw_for_retry: float = 50.0,
+    min_layover_for_charging_h_for_retry: float = 1.0,
+    **kw,
+) -> dict:
+    """Retry infeasible chains with layover charging at eligible LSOAs only."""
+    pass1_kw = dict(kw)
+    pass1_kw.pop("allow_layover_charging", None)
+    pass1_kw.pop("layover_charge_kw", None)
+    pass1_kw.pop("min_layover_for_charging_h", None)
+    pass1_kw.pop("eligible_layover_lsoas", None)
+    pass1 = simulate_coach_chain_year(
+        chain_id,
+        chain_journeys,
+        ev_spec,
+        active_dates,
+        allow_layover_charging=False,
+        **pass1_kw,
+    )
+    if pass1["feasible"] or eligible_layover_lsoas is None:
+        pass1["retry_used"] = False
+        pass1["retry_reason"] = ""
+        return pass1
+
+    chain_lsoas = {
+        str(value)
+        for value in chain_journeys.get("end_lsoa", pd.Series(dtype=str)).dropna().astype(str)
+        if value
+    } | {
+        str(value)
+        for value in chain_journeys.get("start_lsoa", pd.Series(dtype=str)).dropna().astype(str)
+        if value
+    }
+    chain_eligible = chain_lsoas & {str(value) for value in eligible_layover_lsoas}
+    if not chain_eligible:
+        pass1["retry_used"] = False
+        pass1["retry_reason"] = "no_eligible_lsoa_on_chain"
+        return pass1
+
+    pass2 = simulate_coach_chain_year(
+        chain_id,
+        chain_journeys,
+        ev_spec,
+        active_dates,
+        allow_layover_charging=True,
+        layover_charge_kw=float(layover_charge_kw_for_retry),
+        min_layover_for_charging_h=float(min_layover_for_charging_h_for_retry),
+        eligible_layover_lsoas=chain_eligible,
+        **pass1_kw,
+    )
+    pass2["retry_used"] = True
+    pass2["retry_reason"] = "infeasible_pass1_eligible_lsoa_present"
+    pass2["pass1_infeasibility_reasons"] = pass1["infeasibility_reasons"]
+    pass2["pass1_feasible"] = pass1["feasible"]
+    pass2["pass1_energy_charged_kwh"] = pass1["energy_charged_kwh"]
+    pass2["eligible_layover_lsoas"] = sorted(chain_eligible)
+    return pass2
+
+
+__all__ = [
+    "simulate_coach_chain_year",
+    "simulate_coach_chain_year_with_retry",
+    "simulate_coach_fleet_year",
+]

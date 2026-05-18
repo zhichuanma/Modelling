@@ -3,7 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from mobility.coach.annual_simulation import simulate_coach_chain_year, simulate_coach_fleet_year
+from mobility.coach.annual_simulation import (
+    simulate_coach_chain_year,
+    simulate_coach_chain_year_with_retry,
+    simulate_coach_fleet_year,
+)
 from mobility.coach.year_schedule import annual_dates
 from mobility.core.constants import STEP_HOURS_DECISION, STEPS_PER_DAY_DECISION
 
@@ -157,3 +161,42 @@ def test_layover_off_lowers_energy_charged_vs_on() -> None:
 
     assert on["energy_charged_kwh"] > off["energy_charged_kwh"]
     assert on["layover_kwh"] > off["layover_kwh"]
+
+
+def test_retry_enables_eligible_lsoa_layover_charging() -> None:
+    dates = annual_dates()
+    chain = _journeys().assign(
+        distance_km=[80.0, 80.0],
+        start_lsoa=["E01_START", "E01_OK"],
+        end_lsoa=["E01_OK", "E01_END"],
+    )
+
+    pass1 = simulate_coach_chain_year(
+        "C1",
+        chain,
+        {"EV_ID": "EV1", "Energy_kWh": 120.0, "consumption_kwh_per_km": 1.0},
+        [dates[0]],
+        warm_up_days=0,
+        soc_init=1.0,
+        terminus_charge_kw=0.0,
+    )
+    retried = simulate_coach_chain_year_with_retry(
+        "C1",
+        chain,
+        {"EV_ID": "EV1", "Energy_kWh": 120.0, "consumption_kwh_per_km": 1.0},
+        [dates[0]],
+        eligible_layover_lsoas={"E01_OK"},
+        layover_charge_kw_for_retry=120.0,
+        min_layover_for_charging_h_for_retry=1.0,
+        warm_up_days=0,
+        soc_init=1.0,
+        terminus_charge_kw=0.0,
+    )
+
+    assert pass1["feasible"] is False
+    assert retried["retry_used"] is True
+    assert retried["retry_reason"] == "infeasible_pass1_eligible_lsoa_present"
+    assert retried["pass1_feasible"] is False
+    assert retried["feasible"] is True
+    assert retried["energy_charged_kwh"] > pass1["energy_charged_kwh"]
+    assert retried["eligible_layover_lsoas"] == ["E01_OK"]

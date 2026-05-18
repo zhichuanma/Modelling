@@ -94,11 +94,15 @@ def main() -> None:
     station_day_counts_name = f"station_day_counts_{args.year}.parquet"
     failed_name = f"failed_vehicles_{args.year}.csv"
     profile_name = f"profiling_log_{args.year}.csv"
+    trip_records_name = "private_car_trip_records.parquet"
+    charging_events_name = "private_car_charging_events.parquet"
 
     shard_dirs = _resolve_shard_dirs(args)
     curve_frames: list[pd.DataFrame] = []
     station_count_frames: list[pd.DataFrame] = []
     station_day_count_frames: list[pd.DataFrame] = []
+    trip_record_frames: list[pd.DataFrame] = []
+    charging_event_frames: list[pd.DataFrame] = []
     failed_frames: list[pd.DataFrame] = []
     profile_frames: list[pd.DataFrame] = []
     manifest_shards: list[dict] = []
@@ -110,6 +114,20 @@ def main() -> None:
         curve_frames.append(curve)
         station_count_frames.append(station_counts)
         station_day_count_frames.append(station_day_counts)
+
+        trip_record_rows = 0
+        trip_records_path = shard_dir / trip_records_name
+        if trip_records_path.exists():
+            trip_records = pd.read_parquet(trip_records_path)
+            trip_record_rows = int(len(trip_records))
+            trip_record_frames.append(trip_records)
+
+        charging_event_rows = 0
+        charging_events_path = shard_dir / charging_events_name
+        if charging_events_path.exists():
+            charging_events = pd.read_parquet(charging_events_path)
+            charging_event_rows = int(len(charging_events))
+            charging_event_frames.append(charging_events)
 
         failed_path = shard_dir / failed_name
         if failed_path.exists():
@@ -129,6 +147,8 @@ def main() -> None:
                 "station_curve_rows": int(len(curve)),
                 "station_count_rows": int(len(station_counts)),
                 "station_day_count_rows": int(len(station_day_counts)),
+                "trip_record_rows": trip_record_rows,
+                "charging_event_rows": charging_event_rows,
                 "energy_kwh": float(curve["energy_kwh"].sum()) if "energy_kwh" in curve.columns else 0.0,
             }
         )
@@ -136,6 +156,16 @@ def main() -> None:
     station_curve = _combine_station_curves(curve_frames)
     station_counts = _combine_count_frames(station_count_frames, ["station_id"])
     station_day_counts = _combine_count_frames(station_day_count_frames, ["station_id", "date"])
+    trip_records = (
+        pd.concat(trip_record_frames, ignore_index=True)
+        if trip_record_frames
+        else None
+    )
+    charging_events = (
+        pd.concat(charging_event_frames, ignore_index=True)
+        if charging_event_frames
+        else None
+    )
     station_metadata = load_existing_station_metadata(args.data_dir)
     station_summary = build_station_summary_2025(
         station_curve,
@@ -152,6 +182,8 @@ def main() -> None:
         year=args.year,
         station_counts=station_counts,
         station_day_counts=station_day_counts,
+        trip_records=trip_records,
+        charging_events=charging_events,
     )
 
     if failed_frames:
@@ -171,6 +203,8 @@ def main() -> None:
         "station_summary_rows": int(len(station_summary)),
         "station_count_rows": int(len(station_counts)),
         "station_day_count_rows": int(len(station_day_counts)),
+        "trip_record_rows": int(len(trip_records)) if trip_records is not None else 0,
+        "charging_event_rows": int(len(charging_events)) if charging_events is not None else 0,
         "public_station_energy_kwh": float(station_curve["energy_kwh"].sum())
         if not station_curve.empty
         else 0.0,
