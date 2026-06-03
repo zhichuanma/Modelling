@@ -233,7 +233,9 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, object]:
         home_depot_method = str(getattr(args, "home_depot_method", "none"))
         home_depot_radius_km: float | None = None
         if assignment_mode != "legacy_random_zip" and home_depot_method != "none":
-            home_centroids = _try_load_extended_centroids() or centroids
+            home_centroids = _try_load_extended_centroids()
+            if home_centroids is None:
+                home_centroids = centroids
             if home_centroids is None:
                 raise RuntimeError("--home-depot-method requires ONSPD centroids, which could not be loaded.")
             print(f"[annual_depot] assigning home depots (method={home_depot_method})", flush=True)
