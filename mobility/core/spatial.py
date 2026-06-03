@@ -94,6 +94,56 @@ def load_lsoa_centroids(onspd_path: Path | None = None) -> pd.DataFrame:
     return grouped
 
 
+def load_extended_lsoa_centroids(onspd_path: Path | None = None) -> pd.DataFrame:
+    """ONSPD postcode-mean centroids keyed by lsoa21, extended with fallbacks.
+
+    The EV inventory's ``source_lsoa`` mixes geographies: England/Wales LSOA21 and
+    Scotland DZ2022 live in ONSPD ``lsoa21``, but legacy Scotland DZ2011 codes only
+    appear in ``lsoa11`` and NI DZ2021 codes only in ``oa21``. Codes absent from
+    ``lsoa21`` are appended from those columns (priority lsoa21 > lsoa11 > oa21),
+    tagged in ``centroid_source``.
+    """
+    source_path = DEFAULT_ONSPD_PATH if onspd_path is None else Path(onspd_path)
+    raw = pd.read_csv(
+        source_path,
+        usecols=["lsoa21", "lsoa11", "oa21", "oseast1m", "osnrth1m", "lat", "long"],
+        dtype={"lsoa21": "string", "lsoa11": "string", "oa21": "string"},
+    )
+    raw = raw.rename(columns={"oseast1m": "easting_m", "osnrth1m": "northing_m", "long": "lon"})
+    for col in ("easting_m", "northing_m", "lat", "lon"):
+        raw[col] = pd.to_numeric(raw[col], errors="coerce")
+    valid_points = (
+        raw["easting_m"].notna()
+        & raw["northing_m"].notna()
+        & raw["lat"].notna()
+        & raw["lon"].notna()
+        & raw["easting_m"].ne(0.0)
+    )
+
+    frames: list[pd.DataFrame] = []
+    seen_codes: set[str] = set()
+    for code_column in ("lsoa21", "lsoa11", "oa21"):
+        codes = raw[code_column].str.strip()
+        rows = valid_points & codes.notna() & codes.ne("")
+        grouped = (
+            raw.loc[rows, ["easting_m", "northing_m", "lat", "lon"]]
+            .groupby(codes[rows].astype(object), sort=True)
+            .mean()
+            .rename_axis("lsoa_code")
+            .reset_index()
+        )
+        grouped = grouped.loc[~grouped["lsoa_code"].isin(seen_codes)].copy()
+        grouped["centroid_source"] = code_column
+        seen_codes.update(grouped["lsoa_code"])
+        frames.append(grouped)
+
+    centroids = pd.concat(frames, ignore_index=True).sort_values("lsoa_code", kind="stable").reset_index(drop=True)
+    centroids["lsoa_code"] = centroids["lsoa_code"].astype(object)
+    for col in ("easting_m", "northing_m", "lat", "lon"):
+        centroids[col] = centroids[col].astype(float)
+    return centroids
+
+
 def nearest_lsoa_for_points(
     lat: np.ndarray,
     lon: np.ndarray,

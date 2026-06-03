@@ -191,3 +191,276 @@ def test_legacy_function_unchanged_signature_and_output() -> None:
     assert len(legacy) == 2
     assert legacy["assignment_method"].str.contains("representative_duty").all()
     assert "required_kwh_est" not in legacy.columns
+
+
+# ---------------------------------------------------------------------------
+# PR 1.5: home-depot constrained matching
+# ---------------------------------------------------------------------------
+
+from mobility.bus.annual_vehicle_day_assignment import (  # noqa: E402
+    FEASIBLE_HOME_DEPOT_ASSIGNMENT_METHOD,
+    _haversine_km_vec,
+)
+
+# At lat 51.5, 1 degree of longitude is ~69.3 km.
+_DEPOTS = {
+    "depA": (51.5, 0.0),
+    "depB": (51.5, 1.0),  # ~69 km from depA
+    "depC": (51.5, 0.1),  # ~6.9 km from depA
+}
+
+
+def _registry(*depot_ids: str) -> pd.DataFrame:
+    ids = list(depot_ids)
+    return pd.DataFrame(
+        {
+            "depot_id": ids,
+            "depot_lat": [_DEPOTS[d][0] for d in ids],
+            "depot_lon": [_DEPOTS[d][1] for d in ids],
+        }
+    )
+
+
+def _instances_at(passenger_km: list[float], depot_ids: list[str], *, service_date: str = "2026-04-17") -> pd.DataFrame:
+    frame = _instances(passenger_km, service_date=service_date)
+    frame["depot_id"] = depot_ids
+    # Blocks start and end at their attached depot, so the matched same-depot
+    # deadhead is 0 and cross-depot deadhead is the pure depot-depot distance x2.
+    frame["start_lat"] = [_DEPOTS[d][0] for d in depot_ids]
+    frame["start_lon"] = [_DEPOTS[d][1] for d in depot_ids]
+    frame["end_lat"] = [_DEPOTS[d][0] for d in depot_ids]
+    frame["end_lon"] = [_DEPOTS[d][1] for d in depot_ids]
+    return frame
+
+
+def _specs_with_home(range_km: list[float], home_depot_ids: list[str]) -> pd.DataFrame:
+    specs = _specs(range_km)
+    specs["home_depot_id"] = [str(d) for d in home_depot_ids]
+    specs["home_depot_lat"] = [_DEPOTS[d][0] if d else np.nan for d in home_depot_ids]
+    specs["home_depot_lon"] = [_DEPOTS[d][1] if d else np.nan for d in home_depot_ids]
+    specs["home_depot_status"] = ["assigned" if d else "missing_source_lsoa" for d in home_depot_ids]
+    return specs
+
+
+def _depot_km(a: str, b: str) -> float:
+    return float(
+        _haversine_km_vec(
+            np.array([_DEPOTS[a][0]]), np.array([_DEPOTS[a][1]]), np.array([_DEPOTS[b][0]]), np.array([_DEPOTS[b][1]])
+        )[0]
+    )
+
+
+def test_strict_radius_zero_constrains_to_home_depot() -> None:
+    instances = _instances_at([10.0, 10.0, 10.0], ["depA", "depA", "depB"])
+    specs = _specs_with_home([1000.0, 1000.0], ["depA", "depB"])
+    registry = _registry("depA", "depB")
+    for seed in range(5):
+        assignments, diagnostics, unmatched = build_feasible_vehicle_day_assignments(
+            instances, specs, registry, seed=seed, sample_block_multiplier=2.0, home_depot_radius_km=0.0
+        )
+        assert len(assignments) == 2, f"seed={seed}"
+        by_vehicle = assignments.set_index("vehicle_spec_id")
+        assert by_vehicle.loc["ev0", "depot_id"] == "depA"
+        assert by_vehicle.loc["ev1", "depot_id"] == "depB"
+        assert by_vehicle.loc["ev0", "home_depot_id"] == "depA"
+        assert assignments["assignment_method"].eq(FEASIBLE_HOME_DEPOT_ASSIGNMENT_METHOD).all()
+        # The second depA block loses the competition for the single depA vehicle.
+        assert len(unmatched) == 1
+        assert unmatched["unmatched_reason"].iloc[0] == "lost_matching_competition"
+        assert unmatched["n_vehicles_in_radius"].iloc[0] == 1
+
+
+def test_radius_admits_nearby_depot_with_pair_deadhead() -> None:
+    instances = _instances_at([10.0], ["depC"])
+    specs = _specs_with_home([1000.0], ["depA"])
+    registry = _registry("depA", "depC")
+
+    _, _, unmatched_strict = build_feasible_vehicle_day_assignments(
+        instances, specs, registry, seed=1, home_depot_radius_km=0.0
+    )
+    assert unmatched_strict["unmatched_reason"].iloc[0] == "no_vehicle_in_radius"
+    assert unmatched_strict["n_vehicles_in_radius"].iloc[0] == 0
+
+    assignments, _, unmatched = build_feasible_vehicle_day_assignments(
+        instances, specs, registry, seed=1, home_depot_radius_km=10.0
+    )
+    assert unmatched.empty
+    assert len(assignments) == 1
+    # Pair-specific deadhead: home depot -> block start + block end -> home depot.
+    assert np.isclose(assignments["deadhead_km_est"].iloc[0], 2.0 * _depot_km("depA", "depC"))
+    assert not bool(assignments["deadhead_estimate_incomplete"].iloc[0])
+
+
+def test_no_feasible_vehicle_in_radius_reason() -> None:
+    instances = _instances_at([500.0], ["depA"])
+    specs = _specs_with_home([60.0], ["depA"])
+    registry = _registry("depA")
+    assignments, diagnostics, unmatched = build_feasible_vehicle_day_assignments(
+        instances, specs, registry, seed=1, home_depot_radius_km=0.0
+    )
+    assert assignments.empty
+    assert unmatched["unmatched_reason"].iloc[0] == "no_feasible_vehicle_in_radius"
+    assert unmatched["n_vehicles_in_radius"].iloc[0] == 1
+    assert unmatched["n_feasible_vehicles"].iloc[0] == 0
+    row = diagnostics.iloc[0]
+    assert row["n_unmatched_no_feasible_vehicle_in_radius"] == 1
+    assert row["n_unmatched_no_vehicle_in_radius"] == 0
+    assert row["n_unmatched_no_feasible_vehicle"] == 1  # zero feasible edges overall
+
+
+def test_vehicles_without_home_depot_are_excluded() -> None:
+    instances = _instances_at([10.0], ["depA"])
+    registry = _registry("depA")
+    specs = _specs_with_home([1000.0, 1000.0], ["", "depA"])
+    assignments, diagnostics, _ = build_feasible_vehicle_day_assignments(
+        instances, specs, registry, seed=1, home_depot_radius_km=1000.0
+    )
+    assert assignments["vehicle_spec_id"].eq("ev1").all()
+    assert diagnostics["n_ev_specs_with_home_depot"].iloc[0] == 1
+
+    only_unassigned = _specs_with_home([1000.0], [""])
+    assignments_none, _, unmatched_none = build_feasible_vehicle_day_assignments(
+        instances, only_unassigned, registry, seed=1, home_depot_radius_km=1000.0
+    )
+    assert assignments_none.empty
+    assert unmatched_none["unmatched_reason"].iloc[0] == "no_vehicle_in_radius"
+
+
+def test_unconstrained_path_is_unchanged_by_home_columns() -> None:
+    # A/B guard: radius=None must reproduce PR 1 byte-for-byte even when the
+    # specs carry home-depot columns.
+    instances = _instances([10.0, 50.0, 90.0])
+    plain = build_feasible_vehicle_day_assignments(instances, _specs([100.0, 60.0]), seed=42)
+    with_home = build_feasible_vehicle_day_assignments(
+        instances, _specs_with_home([100.0, 60.0], ["depA", "depB"]), seed=42
+    )
+    for a, b in zip(plain, with_home):
+        pd.testing.assert_frame_equal(a, b)
+    assert plain[0]["assignment_method"].eq(FEASIBLE_ASSIGNMENT_METHOD).all()
+    assert plain[0]["home_depot_id"].eq("").all()
+
+
+def test_constrained_deterministic_for_fixed_seed() -> None:
+    instances = _instances_at([10.0, 20.0, 30.0, 40.0], ["depA", "depA", "depB", "depC"])
+    specs = _specs_with_home([100.0, 60.0, 80.0], ["depA", "depB", "depC"])
+    registry = _registry("depA", "depB", "depC")
+    first = build_feasible_vehicle_day_assignments(instances, specs, registry, seed=42, sample_block_multiplier=2.0, home_depot_radius_km=10.0)
+    second = build_feasible_vehicle_day_assignments(instances, specs, registry, seed=42, sample_block_multiplier=2.0, home_depot_radius_km=10.0)
+    for a, b in zip(first, second):
+        pd.testing.assert_frame_equal(a, b)
+
+
+def test_constrained_matching_is_maximum_cardinality_vs_networkx() -> None:
+    import networkx as nx
+
+    rng = np.random.default_rng(7)
+    depot_ids = list(_DEPOTS)
+    for trial in range(5):
+        n_blocks = 12
+        n_specs = 15  # >= n_blocks so every block is sampled
+        block_depots = [depot_ids[i] for i in rng.integers(0, len(depot_ids), size=n_blocks)]
+        passenger = [float(km) for km in rng.uniform(5.0, 120.0, size=n_blocks)]
+        spec_homes = [depot_ids[i] for i in rng.integers(0, len(depot_ids), size=n_specs)]
+        ranges = [float(km) for km in rng.uniform(20.0, 150.0, size=n_specs)]
+        radius = float(rng.choice([0.0, 10.0, 100.0]))
+        instances = _instances_at(passenger, block_depots)
+        specs = _specs_with_home(ranges, spec_homes)
+        registry = _registry(*depot_ids)
+
+        assignments, _, _ = build_feasible_vehicle_day_assignments(
+            instances, specs, registry, seed=trial, sample_block_multiplier=1.0, home_depot_radius_km=radius
+        )
+
+        # Independent reference: build the admissible-and-feasible bipartite
+        # graph from first principles and compare matching cardinality.
+        graph = nx.Graph()
+        block_nodes = [f"b{i}" for i in range(n_blocks)]
+        spec_nodes = [f"v{j}" for j in range(n_specs)]
+        graph.add_nodes_from(block_nodes, bipartite=0)
+        graph.add_nodes_from(spec_nodes, bipartite=1)
+        for i in range(n_blocks):
+            for j in range(n_specs):
+                depot_distance = _depot_km(spec_homes[j], block_depots[i])
+                if not (spec_homes[j] == block_depots[i] or depot_distance <= radius):
+                    continue
+                deadhead = 2.0 * _depot_km(spec_homes[j], block_depots[i])
+                if ranges[j] >= passenger[i] + deadhead:
+                    graph.add_edge(block_nodes[i], spec_nodes[j])
+        reference = nx.algorithms.bipartite.matching.hopcroft_karp_matching(graph, top_nodes=block_nodes)
+        reference_size = sum(1 for node in reference if node.startswith("b"))
+        assert len(assignments) == reference_size, f"trial={trial} radius={radius}"
+
+
+# ---------------------------------------------------------------------------
+# PR 1.5: supply-weighted block sampling (plan v2 §15 decision (b))
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+
+def test_supply_weighted_requires_constrained_mode() -> None:
+    with pytest.raises(ValueError, match="supply_weighted"):
+        build_feasible_vehicle_day_assignments(
+            _instances([10.0]), _specs([60.0]), block_sampling="supply_weighted"
+        )
+    with pytest.raises(ValueError, match="block_sampling"):
+        build_feasible_vehicle_day_assignments(
+            _instances([10.0]), _specs([60.0]), block_sampling="bogus"
+        )
+
+
+def test_supply_weighted_never_samples_blocks_without_reachable_fleet() -> None:
+    # 4 blocks at depB (no fleet), 2 at depA (one vehicle). Under uniform sampling
+    # a depB block would often be drawn; under supply weighting depB weight is 0.
+    instances = _instances_at([10.0] * 6, ["depB", "depB", "depB", "depB", "depA", "depA"])
+    specs = _specs_with_home([1000.0], ["depA"])
+    registry = _registry("depA", "depB")
+    for seed in range(10):
+        assignments, diagnostics, unmatched = build_feasible_vehicle_day_assignments(
+            instances, specs, registry, seed=seed, sample_block_multiplier=1.0,
+            home_depot_radius_km=0.0, block_sampling="supply_weighted",
+        )
+        assert len(assignments) == 1, f"seed={seed}"
+        assert assignments["depot_id"].iloc[0] == "depA"
+        assert unmatched.empty
+        row = diagnostics.iloc[0]
+        assert row["block_sampling"] == "supply_weighted"
+        assert row["n_blocks_positive_sampling_weight"] == 2
+        assert row["n_unmatched_no_vehicle_in_radius"] == 0
+        assert assignments["block_sampling_weight"].iloc[0] == 1.0
+
+
+def test_supply_weighted_sample_size_capped_by_positive_weights() -> None:
+    # Fleet of 3 wants 3 blocks, but only 2 blocks have reachable fleet.
+    instances = _instances_at([10.0, 10.0, 10.0], ["depA", "depA", "depB"])
+    specs = _specs_with_home([1000.0, 1000.0, 1000.0], ["depA", "depA", "depA"])
+    registry = _registry("depA", "depB")
+    _, diagnostics, _ = build_feasible_vehicle_day_assignments(
+        instances, specs, registry, seed=1, home_depot_radius_km=0.0, block_sampling="supply_weighted"
+    )
+    assert diagnostics["n_sampled_block_instances_for_service_date"].iloc[0] == 2
+
+
+def test_supply_weighted_weights_reflect_in_radius_fleet() -> None:
+    # depC is ~6.9 km from depA: radius 10 makes depA's 2 vehicles admit depC
+    # blocks too, and depC's own vehicle admits depA blocks.
+    instances = _instances_at([10.0, 10.0], ["depA", "depC"])
+    specs = _specs_with_home([1000.0, 1000.0, 1000.0], ["depA", "depA", "depC"])
+    registry = _registry("depA", "depC")
+    assignments, _, _ = build_feasible_vehicle_day_assignments(
+        instances, specs, registry, seed=3, sample_block_multiplier=1.0,
+        home_depot_radius_km=10.0, block_sampling="supply_weighted",
+    )
+    assert assignments["block_sampling_weight"].eq(3.0).all()
+
+
+def test_uniform_sampling_unchanged_in_constrained_mode() -> None:
+    instances = _instances_at([10.0, 10.0], ["depA", "depB"])
+    specs = _specs_with_home([1000.0], ["depA"])
+    registry = _registry("depA", "depB")
+    _, diagnostics, _ = build_feasible_vehicle_day_assignments(
+        instances, specs, registry, seed=1, home_depot_radius_km=0.0, block_sampling="uniform"
+    )
+    row = diagnostics.iloc[0]
+    assert row["block_sampling"] == "uniform"
+    assert np.isnan(row["n_blocks_positive_sampling_weight"])

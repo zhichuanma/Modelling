@@ -139,6 +139,7 @@ def _assignment_columns() -> list[str]:
 
 
 FEASIBLE_ASSIGNMENT_METHOD = "sample_then_feasible_match"
+FEASIBLE_HOME_DEPOT_ASSIGNMENT_METHOD = "sample_then_feasible_match_home_depot"
 _EARTH_RADIUS_KM = 6371.0088  # must match annual_depot_events.haversine_km
 
 
@@ -171,6 +172,32 @@ def _spec_range_km(specs: pd.DataFrame) -> np.ndarray:
     return range_km
 
 
+def _block_supply_weights(
+    day_blocks: pd.DataFrame,
+    home_depot_ids: np.ndarray,
+    home_lat: np.ndarray,
+    home_lon: np.ndarray,
+    valid_group_sizes: np.ndarray,
+    radius_km: float,
+) -> np.ndarray:
+    """Per-block weight = number of home-depot vehicles admitting the block's depot."""
+    block_depot_ids = day_blocks["depot_id"].astype(str).to_numpy()
+    unique_depots, first_index, block_depot_index = np.unique(block_depot_ids, return_index=True, return_inverse=True)
+    depot_lat = _coord_column(day_blocks, "depot_lat")[first_index]
+    depot_lon = _coord_column(day_blocks, "depot_lon")[first_index]
+    depot_distance = _haversine_km_vec(home_lat[:, None], home_lon[:, None], depot_lat[None, :], depot_lon[None, :])
+    in_radius = home_depot_ids[:, None] == unique_depots[None, :]
+    in_radius |= np.nan_to_num(depot_distance, nan=np.inf) <= radius_km
+    unique_weights = valid_group_sizes @ in_radius.astype(np.int64)
+    return unique_weights[block_depot_index].astype(float)
+
+
+def _coord_column(frame: pd.DataFrame, name: str) -> np.ndarray:
+    if name in frame.columns:
+        return pd.to_numeric(frame[name], errors="coerce").to_numpy(dtype=float)
+    return np.full(len(frame), np.nan, dtype=float)
+
+
 def _block_deadhead_km(day_blocks: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     """Per-block deadhead estimate: attached depot <-> block start/end, haversine x 1.0.
 
@@ -189,6 +216,36 @@ def _block_deadhead_km(day_blocks: pd.DataFrame) -> tuple[np.ndarray, np.ndarray
     return deadhead, incomplete
 
 
+def _max_bipartite_match(feasible: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Seeded maximum-cardinality bipartite matching on a vehicle x block edge mask.
+
+    Returns the matched vehicle index per block (-1 unmatched). Hopcroft-Karp is
+    deterministic for a fixed matrix, so both sides are relabelled with seeded
+    permutations to avoid a systematic bias toward low-index vehicles/blocks when
+    several maximum matchings exist.
+    """
+    try:
+        from scipy.sparse import csr_matrix
+        from scipy.sparse.csgraph import maximum_bipartite_matching
+    except ImportError as exc:  # pragma: no cover - environment guard
+        raise ImportError(
+            "Home-depot constrained matching requires scipy "
+            "(install with: python -m pip install --user scipy)."
+        ) from exc
+    n_vehicles, n_blocks = feasible.shape
+    match = np.full(n_blocks, -1, dtype=int)
+    if n_vehicles == 0 or n_blocks == 0 or not feasible.any():
+        return match
+    perm_vehicles = rng.permutation(n_vehicles)
+    perm_blocks = rng.permutation(n_blocks)
+    permuted = feasible[perm_vehicles][:, perm_blocks]
+    matched_row_for_col = maximum_bipartite_matching(csr_matrix(permuted), perm_type="row")
+    for permuted_col, permuted_row in enumerate(matched_row_for_col):
+        if permuted_row >= 0:
+            match[int(perm_blocks[permuted_col])] = int(perm_vehicles[permuted_row])
+    return match
+
+
 def build_feasible_vehicle_day_assignments(
     block_instances: pd.DataFrame,
     ev_bus_specs: pd.DataFrame,
@@ -198,18 +255,37 @@ def build_feasible_vehicle_day_assignments(
     scenario_mode: str = "ev_stock_scale",
     sample_block_multiplier: float = 1.0,
     max_vehicle_days: int | None = None,
+    home_depot_radius_km: float | None = None,
+    block_sampling: str = "uniform",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Sample blocks per service date and match EVs to blocks feasibility-aware.
 
     Feasibility under daily-reset SOC is a pure threshold rule:
     ``(passenger_km + deadhead_km) <= battery_kwh * (usable_soc_max - usable_soc_min)
     / consumption_kwh_per_km``, i.e. each block is feasible exactly for the specs
-    whose range covers its total distance. The feasible spec-sets are therefore
-    nested by inclusion, so processing blocks in descending total distance and
-    assigning a uniformly random spec from the currently feasible, still-unused
-    pool yields an exact maximum-cardinality matching (exchange argument on the
-    nested set system). If PR 2 adds non-nested constraints (home depot, vehicle
-    type), this must be replaced by general bipartite matching per constraint group.
+    whose range covers its total distance. With ``home_depot_radius_km=None``
+    (PR 1 behavior) the feasible spec-sets are nested by inclusion, so processing
+    blocks in descending total distance and assigning a uniformly random spec from
+    the currently feasible, still-unused pool yields an exact maximum-cardinality
+    matching (exchange argument on the nested set system).
+
+    With ``home_depot_radius_km`` set (PR 1.5), an EV-block pair is additionally
+    admissible only if the block's attached depot is the EV's home depot or lies
+    within the radius of it, and deadhead is computed pair-specifically
+    home depot <-> block start/end. The constraint breaks the nested structure, so
+    matching switches to exact Hopcroft-Karp (scipy) with seeded relabelling.
+    ``home_depot_radius_km=0.0`` means strict same-depot assignment. EV specs then
+    require the ``home_depot_*`` columns from
+    :func:`mobility.bus.annual_home_depot.assign_home_depots`; specs without an
+    assigned home depot are excluded from matching.
+
+    ``block_sampling`` controls the daily block sample. ``uniform`` draws without
+    replacement from all active blocks (PR 1 semantics). ``supply_weighted``
+    (constrained mode only, plan v2 §15 decision (b)) weights each block by the
+    number of home-depot vehicles admitting its depot under the radius, so blocks
+    with no reachable fleet are never sampled and dense fleets simulate
+    proportionally more local duty. The per-block weight is recorded as
+    ``block_sampling_weight``.
 
     Returns ``(assignments, daily_diagnostics, unmatched_sampled_blocks)``.
     """
@@ -217,6 +293,10 @@ def build_feasible_vehicle_day_assignments(
         raise NotImplementedError("Only scenario_mode='ev_stock_scale' is implemented.")
     if float(sample_block_multiplier) <= 0.0:
         raise ValueError("sample_block_multiplier must be positive.")
+    if block_sampling not in ("uniform", "supply_weighted"):
+        raise ValueError(f"block_sampling must be 'uniform' or 'supply_weighted', got {block_sampling!r}.")
+    if block_sampling == "supply_weighted" and home_depot_radius_km is None:
+        raise ValueError("block_sampling='supply_weighted' requires home_depot_radius_km (constrained mode).")
     if block_instances.empty or ev_bus_specs.empty:
         return (
             pd.DataFrame(columns=_feasible_assignment_columns()),
@@ -251,6 +331,41 @@ def build_feasible_vehicle_day_assignments(
     )
     n_valid_specs = int(np.isfinite(range_km).sum())
 
+    constrained = home_depot_radius_km is not None
+    if constrained:
+        radius_km = float(home_depot_radius_km)
+        if radius_km < 0.0:
+            raise ValueError("home_depot_radius_km must be >= 0.")
+        required_home = {"home_depot_id", "home_depot_lat", "home_depot_lon"}
+        missing_home = sorted(required_home - set(specs.columns))
+        if missing_home:
+            raise ValueError(
+                f"home_depot_radius_km is set but ev_bus_specs is missing home-depot columns {missing_home}; "
+                "run mobility.bus.annual_home_depot.assign_home_depots first."
+            )
+        spec_home_ids = specs["home_depot_id"].fillna("").astype(str).to_numpy()
+        if "home_depot_status" in specs.columns:
+            spec_has_home = specs["home_depot_status"].astype(str).eq("assigned").to_numpy() & (spec_home_ids != "")
+        else:
+            spec_has_home = spec_home_ids != ""
+        valid_vehicle = spec_has_home & np.isfinite(range_km)
+        home_depot_ids, spec_home_idx = np.unique(spec_home_ids, return_inverse=True)
+        home_coords = (
+            specs.assign(_home_id=spec_home_ids)
+            .drop_duplicates("_home_id", keep="first")
+            .set_index("_home_id")[["home_depot_lat", "home_depot_lon"]]
+            .reindex(home_depot_ids)
+        )
+        home_lat = pd.to_numeric(home_coords["home_depot_lat"], errors="coerce").to_numpy(dtype=float)
+        home_lon = pd.to_numeric(home_coords["home_depot_lon"], errors="coerce").to_numpy(dtype=float)
+        valid_group_sizes = np.bincount(spec_home_idx[valid_vehicle], minlength=len(home_depot_ids)).astype(int)
+        n_specs_with_home = int(valid_vehicle.sum())
+        assignment_method = FEASIBLE_HOME_DEPOT_ASSIGNMENT_METHOD
+    else:
+        radius_km = np.nan
+        n_specs_with_home = np.nan
+        assignment_method = FEASIBLE_ASSIGNMENT_METHOD
+
     assignment_records: list[dict[str, Any]] = []
     diagnostic_records: list[dict[str, Any]] = []
     unmatched_records: list[dict[str, Any]] = []
@@ -262,51 +377,127 @@ def build_feasible_vehicle_day_assignments(
         n_sample = min(n_available, int(np.ceil(len(specs) * float(sample_block_multiplier))))
         if n_sample <= 0:
             continue
-        sampled_positions = rng.choice(np.arange(n_available), size=n_sample, replace=False)
+        if block_sampling == "supply_weighted":
+            day_weights = _block_supply_weights(day_blocks, home_depot_ids, home_lat, home_lon, valid_group_sizes, radius_km)
+            positive = np.flatnonzero(day_weights > 0)
+            n_blocks_positive_weight = int(positive.size)
+            n_sample = min(n_sample, n_blocks_positive_weight)
+            if n_sample <= 0:
+                continue
+            # Efraimidis-Spirakis weighted sampling without replacement:
+            # exponential keys scaled by 1/weight, take the n_sample smallest.
+            keys = rng.exponential(1.0, size=positive.size) / day_weights[positive]
+            sampled_positions = positive[np.argsort(keys, kind="stable")[:n_sample]]
+        else:
+            day_weights = None
+            n_blocks_positive_weight = -1
+            sampled_positions = rng.choice(np.arange(n_available), size=n_sample, replace=False)
         sampled = day_blocks.iloc[sampled_positions].reset_index(drop=True)
+        sampled_weights = day_weights[sampled_positions] if day_weights is not None else np.full(n_sample, np.nan)
 
         passenger_km = pd.to_numeric(sampled["passenger_distance_km"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
-        deadhead_km, deadhead_incomplete = _block_deadhead_km(sampled)
-        total_km = passenger_km + deadhead_km
+        if constrained:
+            # Pair-specific admissibility (home depot within radius of the block's
+            # attached depot) and pair-specific deadhead (home depot <-> block
+            # start/end). The spatial constraint breaks the nested threshold
+            # structure, so exact matching uses Hopcroft-Karp.
+            block_depot_ids = sampled["depot_id"].astype(str).to_numpy()
+            block_depot_lat = _coord_column(sampled, "depot_lat")
+            block_depot_lon = _coord_column(sampled, "depot_lon")
+            start_lat = _coord_column(sampled, "start_lat")
+            start_lon = _coord_column(sampled, "start_lon")
+            end_lat = _coord_column(sampled, "end_lat")
+            end_lon = _coord_column(sampled, "end_lon")
 
-        # Exact maximum matching on the nested threshold structure: descending
-        # block distance, random pick from the feasible unused-spec pool.
-        block_order = np.argsort(-total_km, kind="stable")
-        pool: list[int] = []
-        admitted = 0
-        matched_spec_pos = np.full(n_sample, -1, dtype=int)
-        n_feasible_vehicles = np.zeros(n_sample, dtype=int)
-        for block_pos in block_order:
-            km = float(total_km[block_pos])
-            while admitted < len(spec_order_desc):
-                candidate = int(spec_order_desc[admitted])
-                if np.isfinite(range_km[candidate]) and range_km[candidate] >= km:
-                    pool.append(candidate)
-                    admitted += 1
-                else:
-                    break
-            n_feasible_vehicles[block_pos] = admitted
-            if pool:
-                pick = int(rng.integers(len(pool)))
-                pool[pick], pool[-1] = pool[-1], pool[pick]
-                matched_spec_pos[block_pos] = pool.pop()
+            depot_distance = _haversine_km_vec(home_lat[:, None], home_lon[:, None], block_depot_lat[None, :], block_depot_lon[None, :])
+            in_radius = home_depot_ids[:, None] == block_depot_ids[None, :]
+            in_radius |= np.nan_to_num(depot_distance, nan=np.inf) <= radius_km
+            to_block = _haversine_km_vec(home_lat[:, None], home_lon[:, None], start_lat[None, :], start_lon[None, :])
+            from_block = _haversine_km_vec(end_lat[None, :], end_lon[None, :], home_lat[:, None], home_lon[:, None])
+            pair_incomplete = ~np.isfinite(to_block) | ~np.isfinite(from_block)
+            pair_deadhead = np.nan_to_num(to_block, nan=0.0) + np.nan_to_num(from_block, nan=0.0)
+            pair_total = passenger_km[None, :] + pair_deadhead
+
+            feasible = np.zeros((len(specs), n_sample), dtype=bool)
+            for group in range(len(home_depot_ids)):
+                rows = np.flatnonzero(valid_vehicle & (spec_home_idx == group))
+                if rows.size == 0:
+                    continue
+                feasible[rows, :] = in_radius[group][None, :] & (range_km[rows][:, None] >= pair_total[group][None, :])
+            n_vehicles_in_radius = (valid_group_sizes @ in_radius.astype(np.int64)).astype(int)
+            n_feasible_vehicles = feasible.sum(axis=0).astype(int)
+            matched_spec_pos = _max_bipartite_match(feasible, rng)
+
+            # Per-block emission values: matched pair, else best case over
+            # in-radius home depots (NaN when no depot is in radius).
+            any_in_radius = in_radius.any(axis=0)
+            masked_total = np.where(in_radius, pair_total, np.inf)
+            best_group = np.argmin(masked_total, axis=0)
+            column_index = np.arange(n_sample)
+            deadhead_km = np.where(any_in_radius, pair_deadhead[best_group, column_index], np.nan)
+            total_km = np.where(any_in_radius, pair_total[best_group, column_index], np.nan)
+            deadhead_incomplete = np.zeros(n_sample, dtype=bool)
+            matched_columns = np.flatnonzero(matched_spec_pos >= 0)
+            if matched_columns.size:
+                matched_groups = spec_home_idx[matched_spec_pos[matched_columns]]
+                deadhead_km[matched_columns] = pair_deadhead[matched_groups, matched_columns]
+                total_km[matched_columns] = pair_total[matched_groups, matched_columns]
+                deadhead_incomplete[matched_columns] = pair_incomplete[matched_groups, matched_columns]
+            block_order = np.argsort(-np.nan_to_num(total_km, nan=-np.inf), kind="stable")
+        else:
+            deadhead_km, deadhead_incomplete = _block_deadhead_km(sampled)
+            total_km = passenger_km + deadhead_km
+            n_vehicles_in_radius = np.full(n_sample, np.nan)
+
+            # Exact maximum matching on the nested threshold structure: descending
+            # block distance, random pick from the feasible unused-spec pool.
+            block_order = np.argsort(-total_km, kind="stable")
+            pool: list[int] = []
+            admitted = 0
+            matched_spec_pos = np.full(n_sample, -1, dtype=int)
+            n_feasible_vehicles = np.zeros(n_sample, dtype=int)
+            for block_pos in block_order:
+                km = float(total_km[block_pos])
+                while admitted < len(spec_order_desc):
+                    candidate = int(spec_order_desc[admitted])
+                    if np.isfinite(range_km[candidate]) and range_km[candidate] >= km:
+                        pool.append(candidate)
+                        admitted += 1
+                    else:
+                        break
+                n_feasible_vehicles[block_pos] = admitted
+                if pool:
+                    pick = int(rng.integers(len(pool)))
+                    pool[pick], pool[-1] = pool[-1], pool[pick]
+                    matched_spec_pos[block_pos] = pool.pop()
 
         n_matched = 0
         for emit_index, block_pos in enumerate(block_order):
             block_row = sampled.iloc[int(block_pos)]
             spec_pos = int(matched_spec_pos[block_pos])
             if spec_pos < 0:
+                if constrained:
+                    if int(n_vehicles_in_radius[block_pos]) == 0:
+                        reason = "no_vehicle_in_radius"
+                    elif int(n_feasible_vehicles[block_pos]) == 0:
+                        reason = "no_feasible_vehicle_in_radius"
+                    else:
+                        reason = "lost_matching_competition"
+                else:
+                    reason = "no_feasible_vehicle" if n_feasible_vehicles[block_pos] == 0 else "lost_matching_competition"
                 unmatched_records.append(
                     {
                         "service_date": str(service_date),
                         "block_instance_id": str(block_row["block_instance_id"]),
                         "block_id": str(block_row["block_id"]),
-                        "unmatched_reason": "no_feasible_vehicle" if n_feasible_vehicles[block_pos] == 0 else "lost_matching_competition",
+                        "unmatched_reason": reason,
                         "n_feasible_vehicles": int(n_feasible_vehicles[block_pos]),
+                        "n_vehicles_in_radius": float(n_vehicles_in_radius[block_pos]),
+                        "block_sampling_weight": float(sampled_weights[block_pos]),
                         "passenger_distance_km": float(passenger_km[block_pos]),
                         "deadhead_km_est": float(deadhead_km[block_pos]),
                         "total_distance_km_est": float(total_km[block_pos]),
-                        "assignment_method": FEASIBLE_ASSIGNMENT_METHOD,
+                        "assignment_method": assignment_method,
                         "daily_soc_mode": "daily_reset",
                     }
                 )
@@ -324,13 +515,15 @@ def build_feasible_vehicle_day_assignments(
                     "service_id": str(block_row["service_id"]),
                     "block_id": str(block_row["block_id"]),
                     "depot_id": str(block_row.get("depot_id", "")),
+                    "home_depot_id": str(spec_home_ids[spec_pos]) if constrained else "",
                     "region_key": str(block_row.get("region_key", "unknown")),
                     "distance_bin": _distance_bin(distance),
                     "duration_bin": _duration_bin(duration),
                     "assignment_status": "matched_feasible",
-                    "assignment_method": FEASIBLE_ASSIGNMENT_METHOD,
+                    "assignment_method": assignment_method,
                     "scenario_mode": scenario_mode,
                     "sample_weight": 1.0,
+                    "block_sampling_weight": float(sampled_weights[block_pos]),
                     "assignment_seed": daily_seed,
                     "required_kwh_est": float(total_km[block_pos] * spec_consumption[spec_pos]),
                     "available_kwh_at_assignment": float(spec_available_kwh[spec_pos]),
@@ -344,11 +537,19 @@ def build_feasible_vehicle_day_assignments(
         n_unmatched = n_sample - n_matched
         n_blocks_any_feasible = int((n_feasible_vehicles > 0).sum())
         n_no_feasible = int((n_feasible_vehicles == 0).sum())
+        if constrained:
+            n_no_vehicle_in_radius = int((n_vehicles_in_radius == 0).sum())
+            n_no_feasible_in_radius = int(((n_vehicles_in_radius > 0) & (n_feasible_vehicles == 0)).sum())
+        else:
+            n_no_vehicle_in_radius = 0
+            n_no_feasible_in_radius = 0
         diagnostic_records.append(
             {
                 "service_date": str(service_date),
                 "n_ev_specs": int(len(specs)),
                 "n_ev_specs_valid_params": n_valid_specs,
+                "n_ev_specs_with_home_depot": n_specs_with_home,
+                "home_depot_radius_km": radius_km,
                 "n_active_block_instances_for_service_date": n_available,
                 "n_sampled_block_instances_for_service_date": int(n_sample),
                 "n_feasible_edges": int(n_feasible_vehicles.sum()),
@@ -356,11 +557,15 @@ def build_feasible_vehicle_day_assignments(
                 "n_matched_feasible_block_instances_for_service_date": int(n_matched),
                 "n_unmatched_sampled_block_instances_for_service_date": int(n_unmatched),
                 "n_unmatched_no_feasible_vehicle": n_no_feasible,
+                "n_unmatched_no_vehicle_in_radius": n_no_vehicle_in_radius,
+                "n_unmatched_no_feasible_vehicle_in_radius": n_no_feasible_in_radius,
                 "n_unmatched_lost_matching_competition": int(n_unmatched - n_no_feasible),
                 "sampled_block_coverage_share": float(n_sample / n_available) if n_available else np.nan,
                 "matched_sample_share": float(n_matched / n_sample) if n_sample else np.nan,
                 "matched_active_block_share": float(n_matched / n_available) if n_available else np.nan,
-                "assignment_method": FEASIBLE_ASSIGNMENT_METHOD,
+                "block_sampling": block_sampling,
+                "n_blocks_positive_sampling_weight": n_blocks_positive_weight if n_blocks_positive_weight >= 0 else np.nan,
+                "assignment_method": assignment_method,
                 "daily_soc_mode": "daily_reset",
                 # Legacy-named columns kept for run-summary compatibility.
                 "n_available_block_instances_for_service_date": n_available,
@@ -391,6 +596,7 @@ def _feasible_assignment_columns() -> list[str]:
         "service_id",
         "block_id",
         "depot_id",
+        "home_depot_id",
         "region_key",
         "distance_bin",
         "duration_bin",
@@ -398,6 +604,7 @@ def _feasible_assignment_columns() -> list[str]:
         "assignment_method",
         "scenario_mode",
         "sample_weight",
+        "block_sampling_weight",
         "assignment_seed",
         "required_kwh_est",
         "available_kwh_at_assignment",
@@ -412,6 +619,8 @@ def _feasible_diagnostic_columns() -> list[str]:
         "service_date",
         "n_ev_specs",
         "n_ev_specs_valid_params",
+        "n_ev_specs_with_home_depot",
+        "home_depot_radius_km",
         "n_active_block_instances_for_service_date",
         "n_sampled_block_instances_for_service_date",
         "n_feasible_edges",
@@ -419,10 +628,14 @@ def _feasible_diagnostic_columns() -> list[str]:
         "n_matched_feasible_block_instances_for_service_date",
         "n_unmatched_sampled_block_instances_for_service_date",
         "n_unmatched_no_feasible_vehicle",
+        "n_unmatched_no_vehicle_in_radius",
+        "n_unmatched_no_feasible_vehicle_in_radius",
         "n_unmatched_lost_matching_competition",
         "sampled_block_coverage_share",
         "matched_sample_share",
         "matched_active_block_share",
+        "block_sampling",
+        "n_blocks_positive_sampling_weight",
         "assignment_method",
         "daily_soc_mode",
         "n_available_block_instances_for_service_date",
@@ -439,6 +652,8 @@ def _unmatched_block_columns() -> list[str]:
         "block_id",
         "unmatched_reason",
         "n_feasible_vehicles",
+        "n_vehicles_in_radius",
+        "block_sampling_weight",
         "passenger_distance_km",
         "deadhead_km_est",
         "total_distance_km_est",
@@ -449,6 +664,7 @@ def _unmatched_block_columns() -> list[str]:
 
 __all__ = [
     "FEASIBLE_ASSIGNMENT_METHOD",
+    "FEASIBLE_HOME_DEPOT_ASSIGNMENT_METHOD",
     "RNG_SEED",
     "build_feasible_vehicle_day_assignments",
     "build_vehicle_day_assignments",

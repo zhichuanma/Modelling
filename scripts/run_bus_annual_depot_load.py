@@ -39,9 +39,10 @@ from mobility.bus.annual_depot_preflight import run_preflight, write_preflight_s
 from mobility.bus.annual_depot_registry import attach_depots_to_instances, build_operational_depot_registry  # noqa: E402
 from mobility.bus.annual_depot_soc import apply_depot_only_soc  # noqa: E402
 from mobility.bus.annual_ev_specs import build_ev_bus_specs  # noqa: E402
+from mobility.bus.annual_home_depot import assign_home_depots, build_depot_supply_demand  # noqa: E402
 from mobility.bus.annual_lsoa_region import attach_lsoa_and_region  # noqa: E402
 from mobility.bus.calendar import FEED_YEAR_END, FEED_YEAR_START, load_service_calendar  # noqa: E402
-from mobility.core.spatial import DEFAULT_ONSPD_PATH, load_lsoa_centroids  # noqa: E402
+from mobility.core.spatial import DEFAULT_ONSPD_PATH, load_extended_lsoa_centroids, load_lsoa_centroids  # noqa: E402
 
 
 DEFAULT_BLOCKS = REPO_ROOT / "outputs" / "all_blocks.parquet"
@@ -84,7 +85,30 @@ def parse_args() -> argparse.Namespace:
         choices=["sample_then_feasible_match", "legacy_random_zip"],
         help="sample_then_feasible_match: feasibility-aware matching. legacy_random_zip: pre-refactor random pairing.",
     )
-    parser.add_argument("--sample-block-multiplier", type=float, default=1.0, help="Sampled blocks per day = ceil(n_ev_specs * multiplier), capped by active blocks.")
+    parser.add_argument(
+        "--sample-block-multiplier",
+        type=float,
+        default=3.0,
+        help="Sampled blocks per day = ceil(n_ev_specs * multiplier), capped by active blocks (and by positive-weight blocks under supply_weighted). PR 1 parity: 1.0.",
+    )
+    parser.add_argument(
+        "--home-depot-method",
+        default="source_lsoa_nearest",
+        choices=["source_lsoa_nearest", "none"],
+        help="source_lsoa_nearest: pin each EV to the depot nearest its inventory source_lsoa and constrain matching (PR 1.5). none: PR 1 spatially unconstrained matching (A/B baseline).",
+    )
+    parser.add_argument(
+        "--home-depot-radius-km",
+        type=float,
+        default=10.0,
+        help="Admissible block depots lie within this distance of the EV's home depot; 0 = strict same-depot. Ignored with --home-depot-method none.",
+    )
+    parser.add_argument(
+        "--block-sampling",
+        default="supply_weighted",
+        choices=["supply_weighted", "uniform"],
+        help="supply_weighted: daily blocks sampled proportional to in-radius home fleet (plan v2 §15 (b)); requires home depots. uniform: PR 1 sampling.",
+    )
     parser.add_argument("--depot-power-kw", type=float, default=100.0)
     parser.add_argument("--default-overnight-end-hour", type=float, default=6.0)
     parser.add_argument("--seed", type=int, default=20260603)
@@ -204,10 +228,28 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, object]:
 
         print("[annual_depot] building EV bus specs", flush=True)
         ev_specs, ev_diag = build_ev_bus_specs(ev_inventory)
+
+        assignment_mode = str(getattr(args, "assignment_mode", "sample_then_feasible_match"))
+        home_depot_method = str(getattr(args, "home_depot_method", "none"))
+        home_depot_radius_km: float | None = None
+        if assignment_mode != "legacy_random_zip" and home_depot_method != "none":
+            home_centroids = _try_load_extended_centroids() or centroids
+            if home_centroids is None:
+                raise RuntimeError("--home-depot-method requires ONSPD centroids, which could not be loaded.")
+            print(f"[annual_depot] assigning home depots (method={home_depot_method})", flush=True)
+            ev_specs, home_depot_diag = assign_home_depots(ev_specs, depot_registry, home_centroids, method=home_depot_method)
+            home_depot_diag.to_parquet(out_dir / "home_depot_assignment_diagnostics.parquet", index=False)
+            supply_demand = build_depot_supply_demand(ev_specs, block_instances, depot_registry)
+            supply_demand.to_parquet(out_dir / "depot_supply_demand.parquet", index=False)
+            home_depot_radius_km = float(getattr(args, "home_depot_radius_km", 0.0))
         ev_specs.to_parquet(out_dir / "ev_bus_specs.parquet", index=False)
         ev_diag.to_parquet(out_dir / "ev_bus_spec_diagnostics.parquet", index=False)
 
-        assignment_mode = str(getattr(args, "assignment_mode", "sample_then_feasible_match"))
+        block_sampling = str(getattr(args, "block_sampling", "uniform"))
+        if home_depot_radius_km is None and block_sampling == "supply_weighted":
+            print("[annual_depot] note: --block-sampling supply_weighted requires home depots; falling back to uniform", flush=True)
+            block_sampling = "uniform"
+
         max_vehicle_days = int(args.max_vehicle_days) if int(args.max_vehicle_days) > 0 else None
         print(f"[annual_depot] assigning vehicle-days (mode={assignment_mode})", flush=True)
         if assignment_mode == "legacy_random_zip":
@@ -233,6 +275,8 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, object]:
                 scenario_mode=args.scenario_mode,
                 sample_block_multiplier=float(getattr(args, "sample_block_multiplier", 1.0)),
                 max_vehicle_days=max_vehicle_days,
+                home_depot_radius_km=home_depot_radius_km,
+                block_sampling=block_sampling,
             )
         assignments.to_parquet(out_dir / "vehicle_day_assignments.parquet", index=False)
         assignment_diagnostics.to_parquet(out_dir / "vehicle_day_assignment_diagnostics.parquet", index=False)
@@ -779,6 +823,13 @@ def _result_dict(
 def _try_load_centroids() -> pd.DataFrame | None:
     try:
         return load_lsoa_centroids()
+    except (FileNotFoundError, KeyError, ValueError, pd.errors.EmptyDataError):
+        return None
+
+
+def _try_load_extended_centroids() -> pd.DataFrame | None:
+    try:
+        return load_extended_lsoa_centroids()
     except (FileNotFoundError, KeyError, ValueError, pd.errors.EmptyDataError):
         return None
 

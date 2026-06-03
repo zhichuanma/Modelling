@@ -1115,6 +1115,59 @@ constraint under daily_reset isolates the match-share / coverage impact from SOC
 carry-over effects, and PR 2 then only adds temporal state on top of an already
 validated spatial assignment.
 
+#### PR 1.5 draft results (2026-06-03, real data, service_date 2026-04-17)
+
+Implementation: `annual_home_depot.assign_home_depots` + constrained
+Hopcroft-Karp matching (scipy, seeded relabelling, cross-checked against
+networkx) in `build_feasible_vehicle_day_assignments(home_depot_radius_km=...)`.
+
+```text
+home depots:    4,444 / 5,328 EVs assigned (757 distinct depots);
+                median source_lsoa->depot distance 0.21 km, p90 1.08 km
+missing:        884 EVs (16.6%) have no centroid for source_lsoa —
+                677 Scotland DZ2022 (S...) + 207 NI DZ2021 (N20...) codes are
+                not in ONSPD lsoa21; needs the Scotland/NI geojson centroid
+                sources already referenced in mobility/core/spatial.py
+match share:    PR1 unconstrained 98.3%  | radius 0   11.8%
+                radius 10 km      43.9%  | radius 25  54.6%
+runtime:        0.5-4.6 s/day (vs 0.5 s unconstrained)
+```
+
+Open issues — RESOLVED 2026-06-03 (second draft iteration):
+
+1. **Centroid coverage — FIXED, no geojson needed.** The missing codes are
+   legacy geographies that ONSPD itself carries in other columns: Scotland
+   DZ2011 in `lsoa11` (275 distinct codes) and NI DZ2021 in `oa21` (207).
+   `mobility.core.spatial.load_extended_lsoa_centroids()` appends
+   postcode-mean centroids for codes absent from `lsoa21` (priority
+   lsoa21 > lsoa11 > oa21, tagged `centroid_source`). Result: 5,328/5,328 EVs
+   assigned a home depot (996 distinct depots).
+2. **Sampling design — DECISION (b): supply-weighted block sampling.**
+   `block_sampling="supply_weighted"` weights each active block by the number
+   of home-depot vehicles admitting its depot under the radius
+   (Efraimidis-Spirakis without replacement, seeded). Blocks with no reachable
+   fleet are never sampled (`no_vehicle_in_radius` vanishes by construction);
+   per-block weight recorded as `block_sampling_weight`. Uniform sampling kept
+   for A/B (`--block-sampling uniform`).
+
+#### Updated real-data A/B (2026-04-17, full coverage + supply weighting)
+
+```text
+                          mult=1.0   mult=1.5   mult=2.0   mult=3.0
+radius 0   (strict)         43.7%
+radius 10                   61.6%      68.1%      76.6%      87.0%
+radius 25                   59.7%      64.9%      71.1%      86.0%
+(% of 5,328-EV fleet matched; runtime 2-6 s/day)
+```
+
+Production defaults DECIDED 2026-06-03: `--home-depot-radius-km 10.0` +
+`--sample-block-multiplier 3.0` + `--block-sampling supply_weighted`
+(87.0% fleet utilisation, closest comparability with PR 1 depot loads). Note
+§13/§14.6 — multiplier > 1 strengthens the low-energy selection effect, which
+`unmatched_sampled_blocks` + `block_sampling_weight` keep observable. PR 1
+parity invocation: `--home-depot-method none --block-sampling uniform
+--sample-block-multiplier 1.0`.
+
 ### PR 2 — SOC carryover + idle charging + stitched event windows (FINAL DELIVERABLE)
 
 Scope as §8–§10 plus §14 decisions: `--soc-mode carryover`, per-vehicle ledger
