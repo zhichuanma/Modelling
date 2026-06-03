@@ -1,2 +1,12 @@
 {
+    "git.autoRepositoryDetection": "openEditors",
+    "files.watcherExclude": {
+        "**/outputs/**": true,
+        "**/data/**": true
+    },
+    "search.exclude": {
+        "**/outputs/**": true,
+        "**/data/**": true
+    },
+    "search.followSymlinks": false
 }

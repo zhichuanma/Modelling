@@ -6,6 +6,7 @@ __pycache__/
 
 mobility.egg-info/
 
-data/
-output/
-outputs/
+# 同时匹配目录与软链接（带斜杠的模式匹配不到 symlink）
+data
+output
+outputs
