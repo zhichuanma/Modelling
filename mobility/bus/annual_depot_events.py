@@ -52,6 +52,7 @@ def build_vehicle_day_events(
     if assignments.empty:
         return pd.DataFrame(columns=_event_columns())
     merged = assignments.merge(block_instances, on=["service_date", "block_instance_id", "block_template_id", "agency_id", "service_id", "block_id"], how="left", suffixes=("", "_block"))
+    merged = _apply_home_depot_override(merged, depot_registry)
     template_cols = [
         "block_template_id",
         "trip_ids",
@@ -89,6 +90,32 @@ def build_vehicle_day_events(
         events = events.sort_values(["vehicle_day_id", "start_datetime", "event_seq"], kind="stable").reset_index(drop=True)
         events["event_seq"] = events.groupby("vehicle_day_id", sort=False).cumcount()
     return events
+
+
+def _apply_home_depot_override(merged: pd.DataFrame, depot_registry: pd.DataFrame) -> pd.DataFrame:
+    """Home-depot mode (plan v2 §15): the vehicle deadheads from and charges at its HOME depot.
+
+    Constrained assignments carry a non-empty ``home_depot_id``. The feasibility
+    screen budgets deadhead as home depot <-> block start/end, so the event walk
+    must resolve depot coordinates against the same depot; using the block-attached
+    depot diverges from the screen (PR 1.5 full-year audit: 929 infeasible
+    vehicle-days from block-depot deadheads) and attributes charging load to the
+    wrong depot. Rows with an empty ``home_depot_id`` (PR 1 semantics) keep the
+    block-attached depot; the block depot is retained as ``block_depot_id``.
+    """
+    if "home_depot_id" not in merged.columns:
+        return merged
+    home_ids = merged["home_depot_id"].fillna("").astype(str)
+    use_home = home_ids.ne("")
+    if not use_home.any():
+        return merged
+    merged = merged.copy()
+    merged["block_depot_id"] = merged["depot_id"]
+    merged.loc[use_home, "depot_id"] = home_ids[use_home]
+    if "depot_lsoa" in merged.columns and "depot_lsoa" in depot_registry.columns:
+        lsoa_by_depot = depot_registry.drop_duplicates("depot_id", keep="first").set_index("depot_id")["depot_lsoa"]
+        merged.loc[use_home, "depot_lsoa"] = home_ids[use_home].map(lsoa_by_depot).fillna("")
+    return merged
 
 
 def _events_for_vehicle_day(row: Any, *, depot_power_kw: float, default_overnight_end_hour: float, deadhead_speed_kmh: float, use_trip_level_events: bool) -> list[dict[str, Any]]:
