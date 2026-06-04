@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from mobility.bus.annual_home_depot import (
+    HOME_DEPOT_METHOD_SERVICE_SUPPLY_WEIGHTED,
     HOME_DEPOT_STATUS_ASSIGNED,
     HOME_DEPOT_STATUS_MISSING_CENTROID,
     HOME_DEPOT_STATUS_MISSING_SOURCE_LSOA,
@@ -88,6 +89,80 @@ def test_depots_without_coordinates_are_never_home() -> None:
     )
     specs, _ = assign_home_depots(_specs(["L1", "L2"]), registry, _centroids())
     assert not specs["home_depot_id"].eq("depNaN").any()
+
+
+def _supply_blocks() -> pd.DataFrame:
+    # depA: 3 short blocks; depB: 1 long block. block-count weight 3:1, bus_km weight 1:3.
+    return pd.DataFrame(
+        {
+            "depot_id": ["depA", "depA", "depA", "depB"],
+            "block_instance_id": ["b1", "b2", "b3", "b4"],
+            "service_date": ["2026-04-17"] * 4,
+            "passenger_distance_km": [10.0, 10.0, 10.0, 90.0],
+        }
+    )
+
+
+def test_service_supply_weighted_largest_remainder_proportions() -> None:
+    specs, per_depot = assign_home_depots(
+        _specs([""] * 4),
+        _registry(),
+        method=HOME_DEPOT_METHOD_SERVICE_SUPPLY_WEIGHTED,
+        block_instances=_supply_blocks(),
+    )
+    assert specs["home_depot_status"].eq(HOME_DEPOT_STATUS_ASSIGNED).all()
+    assert specs["home_depot_distance_km"].isna().all()
+    counts = per_depot.set_index("depot_id")["n_home_vehicles"]
+    assert counts["depA"] == 3
+    assert counts["depB"] == 1
+
+
+def test_service_supply_weighted_bus_km_weight_flips_proportions() -> None:
+    specs, per_depot = assign_home_depots(
+        _specs([""] * 4),
+        _registry(),
+        method=HOME_DEPOT_METHOD_SERVICE_SUPPLY_WEIGHTED,
+        block_instances=_supply_blocks(),
+        supply_weight="bus_km",
+    )
+    counts = per_depot.set_index("depot_id")["n_home_vehicles"]
+    assert counts["depA"] == 1
+    assert counts["depB"] == 3
+
+
+def test_service_supply_weighted_is_seed_deterministic() -> None:
+    kwargs = dict(method=HOME_DEPOT_METHOD_SERVICE_SUPPLY_WEIGHTED, block_instances=_supply_blocks())
+    first, first_depot = assign_home_depots(_specs([""] * 12), _registry(), **kwargs)
+    second, second_depot = assign_home_depots(_specs([""] * 12), _registry(), **kwargs)
+    pd.testing.assert_frame_equal(first, second)
+    pd.testing.assert_frame_equal(first_depot, second_depot)
+    # A different seed keeps the seat counts but may shuffle spec->depot pairing.
+    third, third_depot = assign_home_depots(_specs([""] * 12), _registry(), seed=99, **kwargs)
+    assert third["home_depot_id"].value_counts().to_dict() == first["home_depot_id"].value_counts().to_dict()
+
+
+def test_service_supply_weighted_excludes_depots_without_coordinates() -> None:
+    registry = pd.concat(
+        [_registry(), pd.DataFrame({"depot_id": ["depNaN"], "depot_lat": [np.nan], "depot_lon": [np.nan], "depot_lsoa": ["E_N"]})],
+        ignore_index=True,
+    )
+    blocks = pd.concat(
+        [_supply_blocks(), pd.DataFrame({"depot_id": ["depNaN"] * 8, "block_instance_id": [f"n{i}" for i in range(8)], "service_date": ["2026-04-17"] * 8, "passenger_distance_km": [10.0] * 8})],
+        ignore_index=True,
+    )
+    specs, _ = assign_home_depots(
+        _specs([""] * 4),
+        registry,
+        method=HOME_DEPOT_METHOD_SERVICE_SUPPLY_WEIGHTED,
+        block_instances=blocks,
+    )
+    assert not specs["home_depot_id"].eq("depNaN").any()
+    assert specs["home_depot_status"].eq(HOME_DEPOT_STATUS_ASSIGNED).all()
+
+
+def test_service_supply_weighted_requires_block_instances() -> None:
+    with pytest.raises(ValueError, match="block_instances"):
+        assign_home_depots(_specs([""]), _registry(), method=HOME_DEPOT_METHOD_SERVICE_SUPPLY_WEIGHTED)
 
 
 def test_depot_supply_demand_table() -> None:

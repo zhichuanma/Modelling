@@ -1,9 +1,18 @@
 """Fixed vehicle home-depot assignment for PR 1.5 (plan v2 §14.2 / §15).
 
-Each EV bus is deterministically pinned to the depot nearest its inventory
-``source_lsoa`` centroid (``source_lsoa_nearest``). No simulation bootstrap is
-involved, so the home depot is stable across runs and usable as a matching
-constraint (``first_assignment`` was rejected as circular in plan v2 §14.2).
+Two deterministic siting methods, both stable across runs and usable as a
+matching constraint (``first_assignment`` was rejected as circular in plan v2
+§14.2):
+
+- ``service_supply_weighted`` (main scenario): EVs are apportioned to depots
+  proportional to each depot's service supply (block instances, optionally
+  bus-km), largest-remainder seats + a seeded spec shuffle. The fleet's spatial
+  distribution follows bus service provision and depot operating structure.
+- ``source_lsoa_nearest`` (sensitivity / equity scenario): each EV is pinned to
+  the depot nearest its inventory ``source_lsoa`` centroid. This reproduces the
+  2025 EV registration geography (population-weighted synthetic EV siting) and
+  over-represents dense urban fleets; it must not be read as an operational
+  electrification scenario.
 """
 
 from __future__ import annotations
@@ -11,11 +20,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from mobility.bus.annual_vehicle_day_assignment import _haversine_km_vec
+from mobility.bus.annual_vehicle_day_assignment import RNG_SEED, _haversine_km_vec
 
 
 HOME_DEPOT_METHOD_SOURCE_LSOA_NEAREST = "source_lsoa_nearest"
-HOME_DEPOT_METHODS = (HOME_DEPOT_METHOD_SOURCE_LSOA_NEAREST,)
+HOME_DEPOT_METHOD_SERVICE_SUPPLY_WEIGHTED = "service_supply_weighted"
+HOME_DEPOT_METHODS = (HOME_DEPOT_METHOD_SOURCE_LSOA_NEAREST, HOME_DEPOT_METHOD_SERVICE_SUPPLY_WEIGHTED)
+
+HOME_DEPOT_SUPPLY_WEIGHTS = ("block_instances", "bus_km")
 
 HOME_DEPOT_STATUS_ASSIGNED = "assigned"
 HOME_DEPOT_STATUS_MISSING_SOURCE_LSOA = "missing_source_lsoa"
@@ -35,15 +47,27 @@ HOME_DEPOT_SPEC_COLUMNS = [
 def assign_home_depots(
     ev_bus_specs: pd.DataFrame,
     depot_registry: pd.DataFrame,
-    centroids: pd.DataFrame,
+    centroids: pd.DataFrame | None = None,
     *,
     method: str = HOME_DEPOT_METHOD_SOURCE_LSOA_NEAREST,
+    block_instances: pd.DataFrame | None = None,
+    supply_weight: str = "block_instances",
+    seed: int = RNG_SEED,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Attach a fixed home depot to every EV spec.
 
-    Returns ``(specs_with_home_depot, per_depot_fleet_counts)``. Specs whose
-    ``source_lsoa`` is empty or has no centroid keep ``home_depot_id == ""`` and a
+    Returns ``(specs_with_home_depot, per_depot_fleet_counts)``.
+
+    ``source_lsoa_nearest`` requires ``centroids``; specs whose ``source_lsoa``
+    is empty or has no centroid keep ``home_depot_id == ""`` and a
     non-``assigned`` ``home_depot_status``; constrained matching excludes them.
+
+    ``service_supply_weighted`` requires ``block_instances`` (with ``depot_id``)
+    and apportions the whole fleet to depots by largest-remainder seats
+    proportional to ``supply_weight`` (``block_instances`` row count or
+    ``bus_km`` = summed ``passenger_distance_km``); specs fill seats via a
+    seeded permutation, every spec is assigned, ``home_depot_distance_km`` is
+    NaN (the siting is synthetic, there is no source point).
     """
     if method not in HOME_DEPOT_METHODS:
         raise NotImplementedError(f"home depot method {method!r} is not implemented; choose from {HOME_DEPOT_METHODS}.")
@@ -51,12 +75,6 @@ def assign_home_depots(
     missing_registry = sorted(required_registry - set(depot_registry.columns))
     if missing_registry:
         raise ValueError(f"depot_registry is missing required columns: {missing_registry}")
-    if "source_lsoa" not in ev_bus_specs.columns:
-        raise ValueError("ev_bus_specs is missing required column: source_lsoa")
-    required_centroids = {"lsoa_code", "lat", "lon"}
-    missing_centroids = sorted(required_centroids - set(centroids.columns))
-    if missing_centroids:
-        raise ValueError(f"centroids is missing required columns: {missing_centroids}")
 
     depots = depot_registry.drop_duplicates("depot_id", keep="first").reset_index(drop=True)
     depot_lat = pd.to_numeric(depots["depot_lat"], errors="coerce").to_numpy(dtype=float)
@@ -70,13 +88,78 @@ def assign_home_depots(
     depot_ids = depots["depot_id"].astype(str).to_numpy()
     depot_lsoas = depots["depot_lsoa"].astype(str).to_numpy() if "depot_lsoa" in depots.columns else np.full(len(depots), "", dtype=object)
 
+    specs = ev_bus_specs.copy()
+    if method == HOME_DEPOT_METHOD_SERVICE_SUPPLY_WEIGHTED:
+        home_depot_id, home_depot_lsoa, home_lat, home_lon, home_distance, status = _home_by_service_supply(
+            specs,
+            block_instances,
+            depot_ids=depot_ids,
+            depot_lsoas=depot_lsoas,
+            depot_lat=depot_lat,
+            depot_lon=depot_lon,
+            supply_weight=supply_weight,
+            seed=seed,
+        )
+    else:
+        home_depot_id, home_depot_lsoa, home_lat, home_lon, home_distance, status = _home_by_source_lsoa(
+            specs,
+            centroids,
+            depot_ids=depot_ids,
+            depot_lsoas=depot_lsoas,
+            depot_lat=depot_lat,
+            depot_lon=depot_lon,
+        )
+
+    specs["home_depot_id"] = home_depot_id
+    specs["home_depot_lsoa"] = home_depot_lsoa
+    specs["home_depot_lat"] = home_lat
+    specs["home_depot_lon"] = home_lon
+    specs["home_depot_distance_km"] = home_distance
+    specs["home_depot_method"] = method
+    specs["home_depot_status"] = status
+
+    assigned = specs.loc[specs["home_depot_status"].eq(HOME_DEPOT_STATUS_ASSIGNED)]
+    per_depot = (
+        assigned.groupby("home_depot_id", as_index=False, sort=True)
+        .agg(
+            n_home_vehicles=("vehicle_spec_id", "size"),
+            n_source_lsoas=("source_lsoa", "nunique"),
+            mean_home_depot_distance_km=("home_depot_distance_km", "mean"),
+            max_home_depot_distance_km=("home_depot_distance_km", "max"),
+        )
+        .rename(columns={"home_depot_id": "depot_id"})
+    )
+    per_depot["share_of_fleet"] = per_depot["n_home_vehicles"] / float(len(specs)) if len(specs) else np.nan
+    per_depot["home_depot_method"] = method
+    per_depot["n_specs_total"] = int(len(specs))
+    per_depot["n_specs_unassigned_home_depot"] = int((~specs["home_depot_status"].eq(HOME_DEPOT_STATUS_ASSIGNED)).sum())
+    return specs, per_depot.reset_index(drop=True)
+
+
+def _home_by_source_lsoa(
+    specs: pd.DataFrame,
+    centroids: pd.DataFrame | None,
+    *,
+    depot_ids: np.ndarray,
+    depot_lsoas: np.ndarray,
+    depot_lat: np.ndarray,
+    depot_lon: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Population-weighted synthetic EV siting: nearest depot to the inventory source_lsoa."""
+    if "source_lsoa" not in specs.columns:
+        raise ValueError("ev_bus_specs is missing required column: source_lsoa")
+    if centroids is None:
+        raise ValueError("method 'source_lsoa_nearest' requires centroids.")
+    required_centroids = {"lsoa_code", "lat", "lon"}
+    missing_centroids = sorted(required_centroids - set(centroids.columns))
+    if missing_centroids:
+        raise ValueError(f"centroids is missing required columns: {missing_centroids}")
+
     centroid_lookup = (
         centroids.assign(lsoa_code=centroids["lsoa_code"].astype(str).str.strip())
         .drop_duplicates("lsoa_code", keep="first")
         .set_index("lsoa_code")[["lat", "lon"]]
     )
-
-    specs = ev_bus_specs.copy()
     source_lsoa = specs["source_lsoa"].fillna("").astype(str).str.strip()
     distinct_lsoas = sorted(set(source_lsoa) - {""})
 
@@ -117,31 +200,79 @@ def assign_home_depots(
         home_lon[row] = depot_lon[position]
         home_distance[row] = distance_km
         status[row] = HOME_DEPOT_STATUS_ASSIGNED
+    return home_depot_id, home_depot_lsoa, home_lat, home_lon, home_distance, status
 
-    specs["home_depot_id"] = home_depot_id
-    specs["home_depot_lsoa"] = home_depot_lsoa
-    specs["home_depot_lat"] = home_lat
-    specs["home_depot_lon"] = home_lon
-    specs["home_depot_distance_km"] = home_distance
-    specs["home_depot_method"] = method
-    specs["home_depot_status"] = status
 
-    assigned = specs.loc[specs["home_depot_status"].eq(HOME_DEPOT_STATUS_ASSIGNED)]
-    per_depot = (
-        assigned.groupby("home_depot_id", as_index=False, sort=True)
-        .agg(
-            n_home_vehicles=("vehicle_spec_id", "size"),
-            n_source_lsoas=("source_lsoa", "nunique"),
-            mean_home_depot_distance_km=("home_depot_distance_km", "mean"),
-            max_home_depot_distance_km=("home_depot_distance_km", "max"),
-        )
-        .rename(columns={"home_depot_id": "depot_id"})
-    )
-    per_depot["share_of_fleet"] = per_depot["n_home_vehicles"] / float(len(specs)) if len(specs) else np.nan
-    per_depot["home_depot_method"] = method
-    per_depot["n_specs_total"] = int(len(specs))
-    per_depot["n_specs_unassigned_home_depot"] = int((~specs["home_depot_status"].eq(HOME_DEPOT_STATUS_ASSIGNED)).sum())
-    return specs, per_depot.reset_index(drop=True)
+def _home_by_service_supply(
+    specs: pd.DataFrame,
+    block_instances: pd.DataFrame | None,
+    *,
+    depot_ids: np.ndarray,
+    depot_lsoas: np.ndarray,
+    depot_lat: np.ndarray,
+    depot_lon: np.ndarray,
+    supply_weight: str,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Operational fleet siting: seats per depot proportional to service supply.
+
+    Largest-remainder (Hamilton) apportionment over per-depot supply weights,
+    then a seeded permutation of specs fills the seats. Deterministic for a
+    fixed (seed, specs, block_instances, registry) tuple.
+    """
+    if supply_weight not in HOME_DEPOT_SUPPLY_WEIGHTS:
+        raise ValueError(f"supply_weight must be one of {HOME_DEPOT_SUPPLY_WEIGHTS}, got {supply_weight!r}.")
+    if block_instances is None or block_instances.empty:
+        raise ValueError("method 'service_supply_weighted' requires non-empty block_instances.")
+    if "depot_id" not in block_instances.columns:
+        raise ValueError("block_instances is missing required column: depot_id")
+    if supply_weight == "bus_km" and "passenger_distance_km" not in block_instances.columns:
+        raise ValueError("supply_weight 'bus_km' requires block_instances column passenger_distance_km.")
+
+    grouped = block_instances.groupby(block_instances["depot_id"].astype(str), sort=False)
+    if supply_weight == "bus_km":
+        weight_by_depot = pd.to_numeric(grouped["passenger_distance_km"].sum(), errors="coerce")
+    else:
+        weight_by_depot = grouped.size().astype(float)
+    weights = weight_by_depot.reindex(depot_ids).fillna(0.0).to_numpy(dtype=float)
+    weights = np.where(np.isfinite(weights) & (weights > 0.0), weights, 0.0)
+    if weights.sum() <= 0.0:
+        raise ValueError("service_supply_weighted: no depot with positive supply weight and finite coordinates.")
+
+    n_specs = len(specs)
+    home_depot_id = np.full(n_specs, "", dtype=object)
+    home_depot_lsoa = np.full(n_specs, "", dtype=object)
+    home_lat = np.full(n_specs, np.nan, dtype=float)
+    home_lon = np.full(n_specs, np.nan, dtype=float)
+    home_distance = np.full(n_specs, np.nan, dtype=float)
+    status = np.full(n_specs, HOME_DEPOT_STATUS_ASSIGNED, dtype=object)
+    if n_specs == 0:
+        return home_depot_id, home_depot_lsoa, home_lat, home_lon, home_distance, status
+
+    seats = _largest_remainder_seats(weights, n_specs)
+    depot_pos_per_seat = np.repeat(np.arange(len(depot_ids)), seats)
+    rng = np.random.default_rng(int(seed))
+    perm = rng.permutation(n_specs)
+    home_pos = np.empty(n_specs, dtype=int)
+    home_pos[perm] = depot_pos_per_seat
+
+    home_depot_id[:] = depot_ids[home_pos]
+    home_depot_lsoa[:] = depot_lsoas[home_pos]
+    home_lat[:] = depot_lat[home_pos]
+    home_lon[:] = depot_lon[home_pos]
+    return home_depot_id, home_depot_lsoa, home_lat, home_lon, home_distance, status
+
+
+def _largest_remainder_seats(weights: np.ndarray, total_seats: int) -> np.ndarray:
+    """Hamilton apportionment with a deterministic tie-break (fraction, weight, index)."""
+    quotas = weights / weights.sum() * float(total_seats)
+    seats = np.floor(quotas).astype(int)
+    remainder = int(total_seats - seats.sum())
+    if remainder > 0:
+        fractions = quotas - seats
+        order = np.lexsort((np.arange(len(weights)), -weights, -fractions))
+        seats[order[:remainder]] += 1
+    return seats
 
 
 def build_depot_supply_demand(
@@ -187,11 +318,13 @@ def build_depot_supply_demand(
 
 __all__ = [
     "HOME_DEPOT_METHODS",
+    "HOME_DEPOT_METHOD_SERVICE_SUPPLY_WEIGHTED",
     "HOME_DEPOT_METHOD_SOURCE_LSOA_NEAREST",
     "HOME_DEPOT_SPEC_COLUMNS",
     "HOME_DEPOT_STATUS_ASSIGNED",
     "HOME_DEPOT_STATUS_MISSING_CENTROID",
     "HOME_DEPOT_STATUS_MISSING_SOURCE_LSOA",
+    "HOME_DEPOT_SUPPLY_WEIGHTS",
     "assign_home_depots",
     "build_depot_supply_demand",
 ]

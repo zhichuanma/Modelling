@@ -93,9 +93,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--home-depot-method",
-        default="source_lsoa_nearest",
-        choices=["source_lsoa_nearest", "none"],
-        help="source_lsoa_nearest: pin each EV to the depot nearest its inventory source_lsoa and constrain matching (PR 1.5). none: PR 1 spatially unconstrained matching (A/B baseline).",
+        default="service_supply_weighted",
+        choices=["service_supply_weighted", "source_lsoa_nearest", "none"],
+        help=(
+            "service_supply_weighted (main scenario): apportion the fleet to depots proportional to "
+            "service supply (largest-remainder seats, seeded fill). "
+            "source_lsoa_nearest (sensitivity): population-weighted synthetic EV siting via the inventory "
+            "source_lsoa; over-represents dense urban fleets. "
+            "none: PR 1 spatially unconstrained matching (A/B baseline)."
+        ),
+    )
+    parser.add_argument(
+        "--home-depot-supply-weight",
+        default="block_instances",
+        choices=["block_instances", "bus_km"],
+        help="Supply weight for service_supply_weighted: per-depot block-instance count or summed passenger km.",
     )
     parser.add_argument(
         "--home-depot-radius-km",
@@ -233,13 +245,23 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, object]:
         home_depot_method = str(getattr(args, "home_depot_method", "none"))
         home_depot_radius_km: float | None = None
         if assignment_mode != "legacy_random_zip" and home_depot_method != "none":
-            home_centroids = _try_load_extended_centroids()
-            if home_centroids is None:
-                home_centroids = centroids
-            if home_centroids is None:
-                raise RuntimeError("--home-depot-method requires ONSPD centroids, which could not be loaded.")
+            home_centroids = None
+            if home_depot_method == "source_lsoa_nearest":
+                home_centroids = _try_load_extended_centroids()
+                if home_centroids is None:
+                    home_centroids = centroids
+                if home_centroids is None:
+                    raise RuntimeError("--home-depot-method source_lsoa_nearest requires ONSPD centroids, which could not be loaded.")
             print(f"[annual_depot] assigning home depots (method={home_depot_method})", flush=True)
-            ev_specs, home_depot_diag = assign_home_depots(ev_specs, depot_registry, home_centroids, method=home_depot_method)
+            ev_specs, home_depot_diag = assign_home_depots(
+                ev_specs,
+                depot_registry,
+                home_centroids,
+                method=home_depot_method,
+                block_instances=block_instances,
+                supply_weight=str(getattr(args, "home_depot_supply_weight", "block_instances")),
+                seed=int(args.seed),
+            )
             home_depot_diag.to_parquet(out_dir / "home_depot_assignment_diagnostics.parquet", index=False)
             supply_demand = build_depot_supply_demand(ev_specs, block_instances, depot_registry)
             supply_demand.to_parquet(out_dir / "depot_supply_demand.parquet", index=False)
