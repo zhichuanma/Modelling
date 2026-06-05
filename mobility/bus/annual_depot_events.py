@@ -177,9 +177,13 @@ def _events_for_vehicle_day(row: Any, *, depot_power_kw: float, default_overnigh
     out.append(_event(base, seq, "block_to_depot_deadhead", last_end, return_dt, block_end_lat, block_end_lon, depot_lat, depot_lon, block_end_lsoa, depot_lsoa, from_block_km, "haversine_x_1.0", False, 0.0))
     seq += 1
     overnight_end = pd.Timestamp(service_date) + pd.Timedelta(days=1) + pd.to_timedelta(float(default_overnight_end_hour), unit="h")
+    if return_dt >= overnight_end:
+        # Late cross-midnight return: the scheduled overnight window has already
+        # passed, so fall back to a post-return window of the same duration to
+        # keep the recharge load observable instead of dropping it entirely.
+        overnight_end = return_dt + pd.to_timedelta(float(default_overnight_end_hour), unit="h")
     event_type = "depot_parking_overnight" if overnight_end.date() != return_dt.date() else "depot_parking_post"
-    if overnight_end > return_dt:
-        out.append(_event(base, seq, event_type, return_dt, overnight_end, depot_lat, depot_lon, depot_lat, depot_lon, depot_lsoa, depot_lsoa, 0.0, "none", True, effective_kw))
+    out.append(_event(base, seq, event_type, return_dt, overnight_end, depot_lat, depot_lon, depot_lat, depot_lon, depot_lsoa, depot_lsoa, 0.0, "none", True, effective_kw))
     for index, event in enumerate(sorted(out, key=lambda item: (pd.Timestamp(item["start_datetime"]), item["event_seq"]))):
         event["event_seq"] = index
     return out

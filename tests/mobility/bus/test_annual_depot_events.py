@@ -105,6 +105,28 @@ def test_overnight_charging_can_cross_midnight() -> None:
     assert overnight["end_datetime"].strftime("%Y-%m-%d") == "2026-04-18"
 
 
+def test_late_cross_midnight_return_still_gets_charging_window() -> None:
+    """A block returning after the scheduled overnight end (next-day 06:00) must
+    still get a post-return depot charging window (return_dt + overnight hours),
+    not silently lose its recharge load."""
+    assignments, block_instances, templates, specs, registry = _inputs()
+    block_instances = block_instances.assign(
+        end_datetime=[pd.Timestamp("2026-04-18 06:30")],
+        end_h=[30.5],
+        duration_h=[22.5],
+    )
+    templates = templates.assign(
+        trip_start_times=[[8.0, 12.0]],
+        trip_end_times=[[9.0, 30.5]],
+    )
+    events = build_vehicle_day_events(assignments, block_instances, templates, specs, registry, depot_power_kw=100.0)
+    last = events.iloc[-1]
+    assert last["event_type"] == "depot_parking_post"
+    assert bool(last["can_charge"])
+    assert last["start_datetime"] >= pd.Timestamp("2026-04-18 06:30")
+    assert (last["end_datetime"] - last["start_datetime"]) == pd.Timedelta(hours=6)
+
+
 def test_midday_depot_window_inserted_when_layover_at_depot() -> None:
     assert "depot_parking_midday" in set(_events()["event_type"])
 

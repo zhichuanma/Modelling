@@ -17,6 +17,8 @@ REQUIRED_LIMITATIONS = [
     "This version does not model multi-day SOC carry-over. Each vehicle-day starts at usable_soc_max.",
     "ev_stock_scale represents a representative annual duty assignment at current EV stock scale, not full UK bus electrification.",
     "If trip-level layovers are unavailable, midday depot charging windows may be missed.",
+    "matched_vehicle_day_feasible_share is conditional on matching: its denominator is matched vehicle-days only; unmatched sampled blocks never enter the SOC/load stages. Read it together with matched_sample_share and the unmatched reason counts.",
+    "Depots without a resolvable LSOA (opdepot_*_missing) have unknown coordinates: their deadhead is recorded as 0 km (incomplete) and their charging load is reported under unknown-depot load isolation; it must not be mapped spatially.",
 ]
 
 
@@ -44,8 +46,8 @@ def build_run_summary_markdown(
     total_charge = _sum(depot_load_15min, "charge_kwh")
     total_energy = float(stats.get("total_energy_kwh", _sum(vehicle_day_soc_summary, "total_energy_kwh")))
     total_deadhead = float(stats.get("total_deadhead_km", _sum(vehicle_day_soc_summary, "total_deadhead_km")))
-    if "depot_only_feasible_share" in stats:
-        feasible_share = float(stats["depot_only_feasible_share"])
+    if "matched_vehicle_day_feasible_share" in stats:
+        feasible_share = float(stats["matched_vehicle_day_feasible_share"])
     elif not vehicle_day_soc_summary.empty and "depot_only_feasible" in vehicle_day_soc_summary.columns:
         feasible_share = float(vehicle_day_soc_summary["depot_only_feasible"].astype(bool).mean())
     else:
@@ -65,6 +67,7 @@ def build_run_summary_markdown(
         f"- n_vehicle_day_assignments: {len(vehicle_day_assignments)}",
         f"- n_unassigned_block_instances_under_ev_stock_scale: {_assignment_unassigned_total(vehicle_day_assignments, assignment_diagnostics)}",
         f"- mean_daily_assignment_coverage_share: {_format_float(_assignment_mean_coverage(vehicle_day_assignments, assignment_diagnostics))}",
+        *_matched_share_lines(assignment_diagnostics),
         *_unmatched_reason_lines(assignment_diagnostics),
         f"- n_bus_trip_records: {_count_from_stats(stats, 'n_bus_trip_records', bus_trip_records)}",
         f"- n_bus_charging_events: {_count_from_stats(stats, 'n_bus_charging_events', bus_charging_events)}",
@@ -75,10 +78,13 @@ def build_run_summary_markdown(
         f"- total_charge_kwh: {total_charge:.3f}",
         f"- total_energy_kwh: {total_energy:.3f}",
         f"- total_deadhead_km: {total_deadhead:.3f}",
-        f"- depot_only_feasible_share: {_format_float(feasible_share)}",
+        f"- matched_vehicle_day_feasible_share: {_format_float(feasible_share)}",
         f"- lsoa_attach_success_rate: {_format_float(_lsoa_attach_success(block_templates))}",
         f"- minibus_count: {preflight_summary.get('minibus_row_count', 0)}",
         f"- sanity_filter_drop_count: {preflight_summary.get('n_ev_specs_dropped_by_sanity', 0)}",
+        "",
+        "## Unknown-depot load isolation",
+        *_unknown_depot_lines(depot_load_15min, vehicle_day_assignments),
         "",
         "## Depot confidence distribution",
     ]
@@ -189,18 +195,87 @@ def _assignment_method(assignments: pd.DataFrame) -> str:
     return methods[0] if len(methods) == 1 else ",".join(sorted(methods))
 
 
-def _unmatched_reason_lines(diagnostics: pd.DataFrame | None) -> list[str]:
+def _diagnostics_sum(diagnostics: pd.DataFrame, column: str) -> float:
+    return float(pd.to_numeric(diagnostics[column], errors="coerce").fillna(0).sum())
+
+
+def _matched_share_lines(diagnostics: pd.DataFrame | None) -> list[str]:
+    """Overall matched shares over sampled / active blocks, the honest companions
+    to matched_vehicle_day_feasible_share (whose denominator is matched days only)."""
     if diagnostics is None or diagnostics.empty:
         return []
     lines: list[str] = []
-    for column, label in (
-        ("n_unmatched_no_feasible_vehicle", "n_unmatched_sampled_blocks_no_feasible_vehicle"),
-        ("n_unmatched_lost_matching_competition", "n_unmatched_sampled_blocks_lost_matching_competition"),
+    matched_col = "n_matched_feasible_block_instances_for_service_date"
+    if matched_col not in diagnostics.columns:
+        return []
+    matched = _diagnostics_sum(diagnostics, matched_col)
+    for denom_col, label in (
+        ("n_sampled_block_instances_for_service_date", "matched_sample_share"),
+        ("n_active_block_instances_for_service_date", "matched_active_block_share"),
     ):
-        if column in diagnostics.columns:
-            total = int(pd.to_numeric(diagnostics[column], errors="coerce").fillna(0).sum())
-            lines.append(f"- {label}: {total}")
+        if denom_col in diagnostics.columns:
+            denom = _diagnostics_sum(diagnostics, denom_col)
+            share = matched / denom if denom else np.nan
+            lines.append(f"- {label}: {_format_float(share)}")
     return lines
+
+
+def _unmatched_reason_lines(diagnostics: pd.DataFrame | None) -> list[str]:
+    """Unmatched-reason counts. The two top-level buckets (no_feasible_vehicle,
+    lost_matching_competition) sum to total unmatched; in constrained mode the
+    radius reasons are a sub-decomposition of no_feasible_vehicle, NOT an
+    additional bucket — printed indented to avoid double-counting."""
+    if diagnostics is None or diagnostics.empty:
+        return []
+    lines: list[str] = []
+    if "n_unmatched_no_feasible_vehicle" in diagnostics.columns:
+        n_no_feasible = int(_diagnostics_sum(diagnostics, "n_unmatched_no_feasible_vehicle"))
+        lines.append(f"- n_unmatched_sampled_blocks_no_feasible_vehicle: {n_no_feasible}")
+        radius_parts = [
+            (column, int(_diagnostics_sum(diagnostics, column)))
+            for column in ("n_unmatched_no_vehicle_in_radius", "n_unmatched_no_feasible_vehicle_in_radius")
+            if column in diagnostics.columns
+        ]
+        if any(count for _, count in radius_parts):
+            for column, count in radius_parts:
+                lines.append(f"  - of which {column.removeprefix('n_unmatched_')}: {count}")
+    if "n_unmatched_lost_matching_competition" in diagnostics.columns:
+        total = int(_diagnostics_sum(diagnostics, "n_unmatched_lost_matching_competition"))
+        lines.append(f"- n_unmatched_sampled_blocks_lost_matching_competition: {total}")
+    return lines
+
+
+def _unknown_depot_mask(frame: pd.DataFrame) -> pd.Series:
+    mask = pd.Series(False, index=frame.index)
+    if "depot_id" in frame.columns:
+        mask |= frame["depot_id"].astype(str).str.endswith("_missing")
+    if "depot_lsoa" in frame.columns:
+        lsoa = frame["depot_lsoa"].fillna("").astype(str).str.strip().str.lower()
+        mask |= lsoa.isin(("", "missing"))
+    return mask
+
+
+def _unknown_depot_lines(depot_load_15min: pd.DataFrame, assignments: pd.DataFrame) -> list[str]:
+    """Isolate load at depots with no resolvable LSOA/coordinates (opdepot_*_missing).
+
+    Their deadhead is recorded as 0 km (incomplete), so their load is optimistic
+    and must not be mapped spatially.
+    """
+    lines: list[str] = []
+    if not depot_load_15min.empty and "charge_kwh" in depot_load_15min.columns:
+        unknown = _unknown_depot_mask(depot_load_15min)
+        total = _sum(depot_load_15min, "charge_kwh")
+        unknown_kwh = float(pd.to_numeric(depot_load_15min.loc[unknown, "charge_kwh"], errors="coerce").fillna(0.0).sum())
+        share = unknown_kwh / total if total else np.nan
+        n_unknown = int(depot_load_15min.loc[unknown, "depot_id"].nunique()) if "depot_id" in depot_load_15min.columns else 0
+        lines.append(f"- unknown_depot_charge_kwh: {unknown_kwh:.3f}")
+        lines.append(f"- unknown_depot_charge_share: {_format_float(share)}")
+        lines.append(f"- n_unknown_depots_with_load: {n_unknown}")
+    if not assignments.empty and "deadhead_estimate_incomplete" in assignments.columns:
+        incomplete = assignments["deadhead_estimate_incomplete"].fillna(False).astype(bool)
+        lines.append(f"- n_vehicle_days_deadhead_incomplete: {int(incomplete.sum())}")
+        lines.append(f"- share_vehicle_days_deadhead_incomplete: {_format_float(float(incomplete.mean()))}")
+    return lines or ["- none: 0"]
 
 
 def _value_counts_lines(frame: pd.DataFrame, column: str) -> list[str]:

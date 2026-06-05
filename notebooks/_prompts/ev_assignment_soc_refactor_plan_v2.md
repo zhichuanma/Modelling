@@ -1162,7 +1162,17 @@ radius 25                   59.7%      64.9%      71.1%      86.0%
 
 Production defaults DECIDED 2026-06-03: `--home-depot-radius-km 10.0` +
 `--sample-block-multiplier 3.0` + `--block-sampling supply_weighted`
-(87.0% fleet utilisation, closest comparability with PR 1 depot loads). Note
+(87.0% fleet utilisation, closest comparability with PR 1 depot loads).
+
+**Feed-tail calendar decay (full-year finding, affects PR 1 and PR 1.5
+equally):** active block instances collapse from ~55k/day (Apr-Nov 2026) to
+~22k (Jan 2027), ~2.4k (Feb) and ~400-475 (Mar-Apr 2027) as GTFS service
+calendars expire toward the feed end. Daily matched vehicle-days track this
+(PR 1.5 holds ~4,600-4,700/day = ~87% of fleet through Nov, PR 1 ~5,280).
+Depot loads for Feb-Apr 2027 therefore reflect calendar expiry, NOT real
+seasonality — annual aggregates and the PR 2 final deliverable must either
+flag these months (alongside `is_warmup`) or truncate reporting at the
+calendar-coverage cliff. Note
 §13/§14.6 — multiplier > 1 strengthens the low-energy selection effect, which
 `unmatched_sampled_blocks` + `block_sampling_weight` keep observable. PR 1
 parity invocation: `--home-depot-method none --block-sampling uniform
@@ -1187,3 +1197,50 @@ curves, `depot_load_15min` with at least
 output contract (`annual_depot_load._load_columns()`) already carries all required
 fields; PR 2 changes the semantics (carry-over SOC, idle charging included in
 load), not the schema.
+
+---
+
+## 16. Post-run code-review fixes (2026-06-04, user review of PR 1 / PR 1.5)
+
+Three reporting/accounting issues found by manual review after the three
+truncated full-year reruns (main / sens_population / pr1_healthy) completed.
+All three confirmed in code and fixed the same day; 207 bus tests pass
+(4 pre-existing data-dependent failures unrelated).
+
+1. **`depot_only_feasible_share` denominator was matched-days-only.**
+   `annual_depot_outputs.py` computed it from `vehicle_day_soc_summary`
+   (equivalently the streaming runner from `n_soc_feasible / n_soc_rows`);
+   unmatched sampled blocks `continue` out of the pipeline before SOC/load and
+   never enter the denominator. FIX: renamed to
+   `matched_vehicle_day_feasible_share`; run summary now also prints
+   `matched_sample_share`, `matched_active_block_share`, and the full
+   unmatched-reason counts incl. the radius reasons
+   (`no_vehicle_in_radius`, `no_feasible_vehicle_in_radius`); limitation note
+   added. The 1.0 figure means only that matched days are depot-only feasible.
+
+2. **`opdepot_*_missing` load entered the main output unisolated.**
+   `annual_depot_registry.py` emits `opdepot_<agency>_missing`
+   (confidence="missing"); `_block_deadhead_km` records missing-coordinate
+   deadhead as 0 km + `deadhead_estimate_incomplete` flag. PR 1 / uniform paths
+   include these optimistic loads silently. FIX: run summary gains an
+   "Unknown-depot load isolation" section (`unknown_depot_charge_kwh`,
+   `unknown_depot_charge_share`, `n_unknown_depots_with_load`,
+   `n_vehicle_days_deadhead_incomplete` + share) and a limitation note that
+   unknown-depot load must not be mapped spatially.
+
+3. **Late cross-midnight returns lost their recharge window.**
+   `annual_depot_events.py` hard-coded overnight end = next-day 06:00 and only
+   appended the parking event `if overnight_end > return_dt` — a vehicle
+   returning after 06:00 next day got NO post-return charging window, silently
+   undercounting charge load. FIX: fallback `overnight_end = return_dt +
+   default_overnight_end_hour` (6 h) when the scheduled window has passed; the
+   parking event is now always appended. New test
+   `test_late_cross_midnight_return_still_gets_charging_window`.
+
+Retro-application policy: fixes 1-2 are reporting-only — existing
+run_summary.md files of the three completed runs are kept as the audit record
+of the code at run time; the corrected restatement lives in the pr1-vs-main
+acceptance analysis (`outputs/_analysis/pr1_vs_main/`). Fix 3 changes simulated
+load: whether the three runs need a rerun depends on the empirically measured
+magnitude (D7 of the acceptance analysis quantifies affected vehicle-days and
+missing kWh); otherwise it lands with the PR 2 rerun anyway.

@@ -765,7 +765,7 @@ def _add_stream_stats(
 def _finalize_stream_stats(stats: dict[str, Any]) -> dict[str, Any]:
     out = {key: value for key, value in stats.items() if key != "top_shortfall_frames"}
     n_soc_rows = int(stats.get("n_soc_rows", 0))
-    out["depot_only_feasible_share"] = float(stats["n_soc_feasible"] / n_soc_rows) if n_soc_rows else float("nan")
+    out["matched_vehicle_day_feasible_share"] = float(stats["n_soc_feasible"] / n_soc_rows) if n_soc_rows else float("nan")
     frames = stats.get("top_shortfall_frames", [])
     if frames:
         top = pd.concat(frames, ignore_index=True).sort_values("energy_shortfall_kwh", ascending=False).head(10)
