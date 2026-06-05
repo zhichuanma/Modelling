@@ -766,6 +766,8 @@ def _run_carryover_streaming_tail(
             default_overnight_end_hour=overnight_end_hour,
             use_trip_level_events=bool(args.use_trip_level_events),
             stitch_start_by_spec=stitch_start_map,
+            inter_trip_relocation=bool(getattr(args, "inter_trip_relocation", False)),
+            relocation_speed_kmh=float(getattr(args, "relocation_speed_kmh", 50.0)),
         )
 
         # 3. Stitch yesterday's pending windows against today's BUILT first
@@ -1113,6 +1115,8 @@ def _build_events_and_soc(
         depot_power_kw=float(args.depot_power_kw),
         default_overnight_end_hour=float(args.default_overnight_end_hour),
         use_trip_level_events=bool(args.use_trip_level_events),
+        inter_trip_relocation=bool(getattr(args, "inter_trip_relocation", False)),
+        relocation_speed_kmh=float(getattr(args, "relocation_speed_kmh", 50.0)),
     )
     return apply_depot_only_soc(events, depot_power_kw=float(args.depot_power_kw))
 

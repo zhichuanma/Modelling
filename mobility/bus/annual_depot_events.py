@@ -21,7 +21,15 @@ DEPOT_CHARGING_EVENT_TYPES = {
     # daily_reset.
     "idle_home_depot_charging",
 }
-MOVEMENT_EVENT_TYPES = {"depot_to_block_deadhead", "passenger_block", "passenger_trip", "block_to_depot_deadhead"}
+MOVEMENT_EVENT_TYPES = {
+    "depot_to_block_deadhead",
+    "passenger_block",
+    "passenger_trip",
+    "block_to_depot_deadhead",
+    # Coach port only (default off for bus): explicit repositioning between
+    # consecutive trips whose endpoints differ (first-fit chain relocation).
+    "inter_trip_relocation",
+}
 FORBIDDEN_CHARGING_EVENT_TYPES = {"public_charger_event", "opportunity_charging", "terminal_public_charging", "OCM_station_event"}
 MIDDAY_DEPOT_DISTANCE_THRESHOLD_KM = 1.0
 
@@ -53,8 +61,17 @@ def build_vehicle_day_events(
     deadhead_speed_kmh: float = 30.0,
     use_trip_level_events: bool = True,
     stitch_start_by_spec: dict[str, pd.Timestamp] | None = None,
+    inter_trip_relocation: bool = False,
+    relocation_speed_kmh: float = 50.0,
 ) -> pd.DataFrame:
     """Build the per-vehicle-day event ledger.
+
+    ``inter_trip_relocation`` (coach port, default off so bus output stays
+    byte-stable): when consecutive trips end/start more than
+    ``MIDDAY_DEPOT_DISTANCE_THRESHOLD_KM`` apart, emit an explicit
+    ``inter_trip_relocation`` movement event (haversine x 1.0 at
+    ``relocation_speed_kmh``) instead of treating the gap as a stationary
+    layover, so repositioning energy is no longer free.
 
     ``stitch_start_by_spec`` switches on carry-over stitching (plan v2 §3.3):
     each vehicle's day opens at its stitch point (the previous day's pending
@@ -98,6 +115,8 @@ def build_vehicle_day_events(
                 deadhead_speed_kmh=deadhead_speed_kmh,
                 use_trip_level_events=use_trip_level_events,
                 stitch_start_by_spec=stitch_start_by_spec,
+                inter_trip_relocation=inter_trip_relocation,
+                relocation_speed_kmh=relocation_speed_kmh,
             )
         )
     events = pd.DataFrame.from_records(records, columns=_event_columns())
@@ -133,7 +152,7 @@ def _apply_home_depot_override(merged: pd.DataFrame, depot_registry: pd.DataFram
     return merged
 
 
-def _events_for_vehicle_day(row: Any, *, depot_power_kw: float, default_overnight_end_hour: float, deadhead_speed_kmh: float, use_trip_level_events: bool, stitch_start_by_spec: dict[str, pd.Timestamp] | None = None) -> list[dict[str, Any]]:
+def _events_for_vehicle_day(row: Any, *, depot_power_kw: float, default_overnight_end_hour: float, deadhead_speed_kmh: float, use_trip_level_events: bool, stitch_start_by_spec: dict[str, pd.Timestamp] | None = None, inter_trip_relocation: bool = False, relocation_speed_kmh: float = 50.0) -> list[dict[str, Any]]:
     service_date = str(getattr(row, "service_date"))
     base = {
         "service_date": service_date,
@@ -191,7 +210,7 @@ def _events_for_vehicle_day(row: Any, *, depot_power_kw: float, default_overnigh
         event["event_seq"] = seq
         out.append(event)
         seq += 1
-    out = _insert_midday_layovers(out, base, depot_lsoa, depot_lat, depot_lon, effective_kw)
+    out = _insert_midday_layovers(out, base, depot_lsoa, depot_lat, depot_lon, effective_kw, inter_trip_relocation=inter_trip_relocation, relocation_speed_kmh=relocation_speed_kmh)
     seq = len(out)
 
     last_end = pd.Timestamp(out[-1]["end_datetime"]) if out else end_dt
@@ -275,6 +294,9 @@ def _insert_midday_layovers(
     depot_lat: float,
     depot_lon: float,
     charge_power_kw: float,
+    *,
+    inter_trip_relocation: bool = False,
+    relocation_speed_kmh: float = 50.0,
 ) -> list[dict[str, Any]]:
     if len(events) < 2:
         return events
@@ -286,20 +308,56 @@ def _insert_midday_layovers(
         gap_min = (pd.Timestamp(right["start_datetime"]) - pd.Timestamp(left["end_datetime"])).total_seconds() / 60.0
         if gap_min <= 0:
             continue
-        is_depot = _is_depot_layover(left, right, depot_lsoa, depot_lat, depot_lon)
+        layover_start = pd.Timestamp(left["end_datetime"])
+        layover_left = left
+        if inter_trip_relocation:
+            reloc_km = haversine_km(left["end_lat"], left["end_lon"], right["start_lat"], right["start_lon"])
+            if np.isfinite(reloc_km) and reloc_km > MIDDAY_DEPOT_DISTANCE_THRESHOLD_KM:
+                # Explicit repositioning: distance always counted in full;
+                # duration capped at the available gap (the chain builder's
+                # transit buffer can be tighter than distance/speed).
+                reloc_minutes = min(gap_min, reloc_km / float(relocation_speed_kmh) * 60.0)
+                reloc_end = layover_start + pd.to_timedelta(reloc_minutes, unit="m")
+                out.append(
+                    _event(
+                        base,
+                        0,
+                        "inter_trip_relocation",
+                        layover_start,
+                        reloc_end,
+                        left["end_lat"],
+                        left["end_lon"],
+                        right["start_lat"],
+                        right["start_lon"],
+                        left["end_lsoa"],
+                        right["start_lsoa"],
+                        float(reloc_km),
+                        "haversine_x_1.0",
+                        False,
+                        0.0,
+                    )
+                )
+                remaining_min = gap_min - reloc_minutes
+                if remaining_min <= 0:
+                    continue
+                # The vehicle now waits at the NEXT trip's start location.
+                layover_start = reloc_end
+                layover_left = {**left, "end_lat": right["start_lat"], "end_lon": right["start_lon"], "end_lsoa": right["start_lsoa"]}
+                gap_min = remaining_min
+        is_depot = _is_depot_layover(layover_left, right, depot_lsoa, depot_lat, depot_lon)
         event_type = "depot_parking_midday" if is_depot and gap_min >= 30.0 else "terminal_layover"
         out.append(
             _event(
                 base,
                 0,
                 event_type,
-                pd.Timestamp(left["end_datetime"]),
+                layover_start,
                 pd.Timestamp(right["start_datetime"]),
-                left["end_lat"],
-                left["end_lon"],
+                layover_left["end_lat"],
+                layover_left["end_lon"],
                 right["start_lat"],
                 right["start_lon"],
-                left["end_lsoa"],
+                layover_left["end_lsoa"],
                 right["start_lsoa"],
                 0.0,
                 "none",
