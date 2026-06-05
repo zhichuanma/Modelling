@@ -39,6 +39,25 @@ from mobility.bus.annual_depot_preflight import run_preflight, write_preflight_s
 from mobility.bus.annual_depot_registry import attach_depots_to_instances, build_operational_depot_registry  # noqa: E402
 from mobility.bus.annual_depot_soc import apply_depot_only_soc  # noqa: E402
 from mobility.bus.annual_ev_specs import build_ev_bus_specs  # noqa: E402
+from mobility.bus.annual_soc_state import (  # noqa: E402
+    IDLE_EVENT_TYPE,
+    advance_state_after_walk,
+    available_from_by_spec,
+    finalize_day_frames,
+    first_event_start_by_spec,
+    initialize_soc_state,
+    project_available_kwh,
+    soc_init_by_vehicle_day,
+    soc_state_from_frame,
+    soc_state_to_frame,
+    stitch_pendings,
+)
+from mobility.bus.annual_vehicle_day_assignment import (  # noqa: E402
+    assign_vehicle_days_for_date,
+    assignment_frames_from_records,
+    build_matching_context,
+    merge_depot_coords,
+)
 from mobility.bus.annual_home_depot import assign_home_depots, build_depot_supply_demand  # noqa: E402
 from mobility.bus.annual_lsoa_region import attach_lsoa_and_region  # noqa: E402
 from mobility.bus.calendar import FEED_YEAR_END, FEED_YEAR_START, load_service_calendar  # noqa: E402
@@ -59,6 +78,14 @@ STREAM_LOAD_DATASET_NAMES = [
     "depot_load_15min",
     "depot_daily_summary",
 ]
+# Carryover mode (plan v2 §8): assignments are produced inside the day loop and
+# the per-vehicle SOC state is checkpointed per service_date for exact resume.
+CARRYOVER_ASSIGNMENT_DATASET_NAMES = [
+    "vehicle_day_assignments",
+    "vehicle_day_assignment_diagnostics",
+    "unmatched_sampled_blocks",
+]
+SOC_STATE_DATASET_NAME = "vehicle_soc_state"
 RESUME_ARTIFACT_FILES = {
     "block_templates_lsoa": "block_templates_lsoa.parquet",
     "block_instances": "block_instances_annual.parquet",
@@ -138,6 +165,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--date-chunk-size", type=int, default=1, help="Number of service_date values to process per stream chunk.")
     parser.add_argument("--use-trip-level-events", type=_parse_bool, default=True)
     parser.add_argument("--enable-physical-depot-sources", type=_parse_bool, default=False)
+    parser.add_argument(
+        "--soc-mode",
+        default="daily_reset",
+        choices=["daily_reset", "carryover"],
+        help=(
+            "daily_reset: every vehicle-day starts at usable_soc_max (legacy, default). "
+            "carryover (plan v2 §8): SOC carries across service days via per-vehicle ledger "
+            "stitching; assignment moves inside the chronological day loop; idle vehicles "
+            "charge at their home depot; requires feasibility-aware assignment, home depots, "
+            "and --stream true."
+        ),
+    )
+    parser.add_argument(
+        "--warmup-days",
+        type=int,
+        default=14,
+        help="Carryover only (§14.5): first N service dates are flagged is_warmup and excluded from headline summary metrics (rows stay in all tables).",
+    )
+    parser.add_argument(
+        "--idle-vehicle-charging-policy",
+        default="home_depot",
+        choices=["home_depot", "none"],
+        help="Carryover only (§14.4): home_depot charges idle vehicles to usable_soc_max at their home depot (explicit events); none disables idle charging.",
+    )
     return parser.parse_args()
 
 
@@ -153,6 +204,16 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, object]:
     resume = bool(getattr(args, "resume", False))
     if resume and not bool(getattr(args, "stream", True)):
         raise ValueError("--resume requires --stream true.")
+    soc_mode = str(getattr(args, "soc_mode", "daily_reset"))
+    if soc_mode == "carryover":
+        if str(getattr(args, "assignment_mode", "sample_then_feasible_match")) == "legacy_random_zip":
+            raise ValueError("--soc-mode carryover requires feasibility-aware assignment (--assignment-mode sample_then_feasible_match).")
+        if str(getattr(args, "home_depot_method", "none")) == "none":
+            raise ValueError("--soc-mode carryover requires a fixed home depot (--home-depot-method != none): overnight stitching and idle charging anchor to it.")
+        if not bool(getattr(args, "stream", True)):
+            raise ValueError("--soc-mode carryover requires --stream true (the day loop is inherently streaming).")
+        if int(getattr(args, "max_vehicle_days", 0)) > 0:
+            raise ValueError("--max-vehicle-days is incompatible with --soc-mode carryover (state must thread through complete days); use --max-days.")
 
     out_dir = _resolve_path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -192,7 +253,13 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, object]:
 
     if resume:
         print("[annual_depot] resume: loading persisted upstream artifacts", flush=True)
-        artifact_paths = {key: out_dir / name for key, name in RESUME_ARTIFACT_FILES.items()}
+        # Carryover produces assignments inside the day loop (per-date
+        # partitions); the upfront full-year assignment parquets do not exist.
+        artifact_files = dict(RESUME_ARTIFACT_FILES)
+        if soc_mode == "carryover":
+            artifact_files.pop("assignments")
+            artifact_files.pop("assignment_diagnostics")
+        artifact_paths = {key: out_dir / name for key, name in artifact_files.items()}
         missing = [str(path) for path in artifact_paths.values() if not path.exists()]
         if missing:
             raise RuntimeError(f"--resume requires persisted upstream artifacts in --out-dir; missing: {missing}")
@@ -200,8 +267,12 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, object]:
         block_instances = pd.read_parquet(artifact_paths["block_instances"])
         depot_registry = pd.read_parquet(artifact_paths["depot_registry"])
         ev_specs = pd.read_parquet(artifact_paths["ev_specs"])
-        assignments = pd.read_parquet(artifact_paths["assignments"])
-        assignment_diagnostics = pd.read_parquet(artifact_paths["assignment_diagnostics"])
+        if soc_mode == "carryover":
+            assignments = None
+            assignment_diagnostics = None
+        else:
+            assignments = pd.read_parquet(artifact_paths["assignments"])
+            assignment_diagnostics = pd.read_parquet(artifact_paths["assignment_diagnostics"])
     else:
         print("[annual_depot] building block templates", flush=True)
         block_templates, block_template_diag = build_block_templates(blocks)
@@ -274,6 +345,26 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, object]:
             print("[annual_depot] note: --block-sampling supply_weighted requires home depots; falling back to uniform", flush=True)
             block_sampling = "uniform"
 
+        if soc_mode == "carryover":
+            # Carryover (plan v2 §8.2): assignment depends on each day's carried
+            # SOC state, so it happens inside the chronological day loop in
+            # _run_carryover_streaming_tail — nothing to precompute here.
+            if home_depot_radius_km is None:
+                raise ValueError("--soc-mode carryover requires home depots with a radius (--home-depot-method != none).")
+            return _run_carryover_streaming_tail(
+                args,
+                out_dir=out_dir,
+                start_iso=start_iso,
+                end_iso=end_iso,
+                preflight=preflight,
+                block_templates_lsoa=block_templates_lsoa,
+                block_instances=block_instances,
+                depot_registry=depot_registry,
+                ev_specs=ev_specs,
+                home_depot_radius_km=home_depot_radius_km,
+                block_sampling=block_sampling,
+            )
+
         max_vehicle_days = int(args.max_vehicle_days) if int(args.max_vehicle_days) > 0 else None
         print(f"[annual_depot] assigning vehicle-days (mode={assignment_mode})", flush=True)
         if assignment_mode == "legacy_random_zip":
@@ -305,6 +396,22 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, object]:
         assignments.to_parquet(out_dir / "vehicle_day_assignments.parquet", index=False)
         assignment_diagnostics.to_parquet(out_dir / "vehicle_day_assignment_diagnostics.parquet", index=False)
         unmatched_blocks.to_parquet(out_dir / "unmatched_sampled_blocks.parquet", index=False)
+
+    if soc_mode == "carryover":
+        # Resume path: upstream artifacts loaded from disk; assignment happens in-loop.
+        return _run_carryover_streaming_tail(
+            args,
+            out_dir=out_dir,
+            start_iso=start_iso,
+            end_iso=end_iso,
+            preflight=preflight,
+            block_templates_lsoa=block_templates_lsoa,
+            block_instances=block_instances,
+            depot_registry=depot_registry,
+            ev_specs=ev_specs,
+            home_depot_radius_km=float(getattr(args, "home_depot_radius_km", 10.0)),
+            block_sampling=str(getattr(args, "block_sampling", "supply_weighted")),
+        )
 
     if bool(getattr(args, "stream", True)):
         return _run_streaming_pipeline_tail(
@@ -537,6 +644,455 @@ def _run_streaming_pipeline_tail(
         depot_load=depot_load,
         artifact_counts=summary_stats,
     )
+
+
+def _run_carryover_streaming_tail(
+    args: argparse.Namespace,
+    *,
+    out_dir: Path,
+    start_iso: str,
+    end_iso: str,
+    preflight: dict[str, Any],
+    block_templates_lsoa: pd.DataFrame,
+    block_instances: pd.DataFrame,
+    depot_registry: pd.DataFrame,
+    ev_specs: pd.DataFrame,
+    home_depot_radius_km: float,
+    block_sampling: str,
+) -> dict[str, object]:
+    """Chronological day loop with SOC carry-over (plan v2 §8) and lag-one finalize.
+
+    Day D's overnight/idle windows end where day D+1's first events begin
+    (§3.3 stitching), so day D's partitions are finalized and written at the
+    START of iteration D+1; the per-spec ``vehicle_soc_state`` checkpoint is
+    written LAST and doubles as the day's completion marker for --resume.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    resume = bool(getattr(args, "resume", False))
+    depot_power_kw = float(args.depot_power_kw)
+    overnight_end_hour = float(args.default_overnight_end_hour)
+    warmup_days = max(0, int(getattr(args, "warmup_days", 14)))
+    idle_policy = str(getattr(args, "idle_vehicle_charging_policy", "home_depot"))
+    seed = int(args.seed)
+
+    instances = merge_depot_coords(block_instances, depot_registry)
+    instance_dates = instances["service_date"].astype(str)
+    service_dates = sorted(date for date in instance_dates.unique() if start_iso <= date <= end_iso)
+    if not service_dates:
+        raise RuntimeError("carryover: no active service dates in the requested window.")
+    warmup_set = set(service_dates[:warmup_days])
+    counts_by_date = instance_dates.value_counts()
+    median_active = float(counts_by_date.reindex(service_dates).fillna(0).median())
+    decay_floor = 0.5 * median_active
+    decay_suspect_dates = sorted(date for date in service_dates if float(counts_by_date.get(date, 0)) < decay_floor)
+
+    context = build_matching_context(ev_specs, float(home_depot_radius_km))
+    stats = _new_carryover_stream_stats()
+    depot_load_frames: list[pd.DataFrame] = []
+    depot_daily_frames: list[pd.DataFrame] = []
+
+    if resume:
+        if not (out_dir / SOC_STATE_DATASET_NAME).is_dir() and (out_dir / "vehicle_day_events").is_dir():
+            raise RuntimeError(
+                "--resume: --out-dir holds stream partitions but no vehicle_soc_state checkpoints; "
+                "it looks like a daily_reset run tree, which cannot be resumed under --soc-mode carryover."
+            )
+        done_dates, redo_dates = _scan_resume_dates_carryover(out_dir, service_dates)
+        _clear_partition_dirs_carryover(out_dir, redo_dates)
+        print(
+            f"[annual_depot] carryover resume: {len(done_dates):,} complete day(s), "
+            f"{len(redo_dates):,} partial day(s) cleared, {len(service_dates) - len(done_dates):,} to run",
+            flush=True,
+        )
+        if done_dates:
+            state_frame = _read_partition(out_dir, SOC_STATE_DATASET_NAME, done_dates[-1])
+            expected_specs = set(ev_specs["vehicle_spec_id"].astype(str))
+            checkpoint_specs = set(state_frame["vehicle_spec_id"].astype(str))
+            if checkpoint_specs != expected_specs:
+                raise RuntimeError(
+                    f"carryover resume: vehicle_soc_state checkpoint for {done_dates[-1]} covers "
+                    f"{len(checkpoint_specs):,} specs, expected {len(expected_specs):,}; state is broken (§8.5)."
+                )
+            state = soc_state_from_frame(state_frame)
+            _replay_completed_dates_carryover(out_dir, done_dates, stats, depot_load_frames, depot_daily_frames, warmup_set)
+        else:
+            state = initialize_soc_state(ev_specs, start_ts=pd.Timestamp(start_iso))
+        remaining_dates = service_dates[len(done_dates) :]
+    else:
+        _prepare_carryover_output_dirs(out_dir)
+        state = initialize_soc_state(ev_specs, start_ts=pd.Timestamp(start_iso))
+        remaining_dates = service_dates
+
+    print(
+        f"[annual_depot] carryover stream: {len(remaining_dates):,} service_date(s), "
+        f"warmup_days={warmup_days}, idle_policy={idle_policy}",
+        flush=True,
+    )
+    prev_buffer: dict[str, Any] | None = None
+    for day_index, service_date in enumerate(remaining_dates, start=1):
+        print(f"[annual_depot] carryover day {day_index:,}/{len(remaining_dates):,}: {service_date}", flush=True)
+        day_blocks = instances.loc[instance_dates.eq(service_date)].copy()
+
+        # 1. Assign with state-projected screening + temporal guard (§8.2/§8.4).
+        assignment_records, diagnostic_records, unmatched_records = assign_vehicle_days_for_date(
+            day_blocks,
+            context,
+            service_date=service_date,
+            seed=seed,
+            scenario_mode=str(args.scenario_mode),
+            sample_block_multiplier=float(getattr(args, "sample_block_multiplier", 1.0)),
+            block_sampling=block_sampling,
+            soc_mode="carryover",
+            available_kwh_by_spec=project_available_kwh(state),
+            available_from_by_spec=available_from_by_spec(state),
+        )
+        assignments, diagnostics, unmatched = assignment_frames_from_records(
+            assignment_records, diagnostic_records, unmatched_records
+        )
+
+        # 2. Build the day's events from each spec's stitch seam (§3.3: no
+        #    midnight pre window; pre opens at the previous pending's seam).
+        stitch_start_map = {
+            spec_id: (spec.pending.seam_end if spec.pending is not None else spec.last_event_end_ts)
+            for spec_id, spec in state.items()
+        }
+        events = build_vehicle_day_events(
+            assignments,
+            day_blocks,
+            block_templates_lsoa,
+            ev_specs,
+            depot_registry,
+            depot_power_kw=depot_power_kw,
+            default_overnight_end_hour=overnight_end_hour,
+            use_trip_level_events=bool(args.use_trip_level_events),
+            stitch_start_by_spec=stitch_start_map,
+        )
+
+        # 3. Stitch yesterday's pending windows against today's BUILT first
+        #    events (exact, no estimate drift), then finalize & write yesterday.
+        first_starts = first_event_start_by_spec(events)
+        stitch_results = stitch_pendings(state, first_starts)
+        if prev_buffer is not None:
+            day_load, day_daily = _write_carryover_day(
+                prev_buffer, stitch_results, state=state, out_dir=out_dir, depot_registry=depot_registry, start_iso=start_iso, stats=stats
+            )
+            depot_load_frames.append(day_load)
+            depot_daily_frames.append(day_daily)
+
+        # 4. SOC walk from the exact stitch SOC (missing state fatal, §8.5).
+        soc_init = soc_init_by_vehicle_day(assignments, stitch_results)
+        events, soc_summary = apply_depot_only_soc(
+            events, depot_power_kw=depot_power_kw, soc_mode="carryover", soc_init_by_vehicle_day=soc_init
+        )
+
+        # 5. Advance state: every spec opens a new pending (duty overnight or idle).
+        advance_state_after_walk(
+            state,
+            stitch_results,
+            events,
+            assignments,
+            service_date=service_date,
+            depot_power_kw=depot_power_kw,
+            default_overnight_end_hour=overnight_end_hour,
+            idle_vehicle_charging_policy=idle_policy,
+        )
+        prev_buffer = {
+            "service_date": service_date,
+            "events": events,
+            "soc_summary": soc_summary,
+            "assignments": assignments,
+            "diagnostics": diagnostics,
+            "unmatched": unmatched,
+            "state_frame": soc_state_to_frame(state, service_date),
+            "is_warmup": service_date in warmup_set,
+        }
+        gc.collect()
+
+    if prev_buffer is not None:
+        # End of range: every pending window ends at its natural seam.
+        final_stitch = stitch_pendings(state, {})
+        day_load, day_daily = _write_carryover_day(
+            prev_buffer, final_stitch, state=state, out_dir=out_dir, depot_registry=depot_registry, start_iso=start_iso, stats=stats
+        )
+        depot_load_frames.append(day_load)
+        depot_daily_frames.append(day_daily)
+
+    depot_load, depot_daily = _combine_stream_load_outputs(depot_load_frames, depot_daily_frames, depot_registry)
+    _assert_stream_energy_close(stats)
+    depot_load.to_parquet(out_dir / "depot_load_15min.parquet", index=False)
+    depot_daily.to_parquet(out_dir / "depot_daily_summary.parquet", index=False)
+    _write_empty_stream_datasets_if_needed(out_dir, stats)
+
+    # Combined assignment artifacts for parity with the daily_reset layout.
+    assignments_all = _concat_partitions(out_dir, "vehicle_day_assignments", service_dates)
+    diagnostics_all = _concat_partitions(out_dir, "vehicle_day_assignment_diagnostics", service_dates)
+    unmatched_all = _concat_partitions(out_dir, "unmatched_sampled_blocks", service_dates)
+    assignments_all.to_parquet(out_dir / "vehicle_day_assignments.parquet", index=False)
+    diagnostics_all.to_parquet(out_dir / "vehicle_day_assignment_diagnostics.parquet", index=False)
+    unmatched_all.to_parquet(out_dir / "unmatched_sampled_blocks.parquet", index=False)
+
+    summary_stats = _finalize_carryover_stream_stats(stats)
+    summary_stats.update(
+        {
+            "soc_day_boundary_hour": overnight_end_hour,
+            "warmup_days": warmup_days,
+            "warmup_start_date": service_dates[0] if warmup_set else "",
+            "warmup_end_date": service_dates[: warmup_days][-1] if warmup_set else "",
+            "idle_vehicle_charging_policy": idle_policy,
+            "n_temporal_overlap_exclusions": int(
+                pd.to_numeric(diagnostics_all.get("n_unmatched_vehicle_busy_overnight", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+            ),
+            "calendar_decay_median_active_blocks": median_active,
+            "calendar_decay_floor": decay_floor,
+            "calendar_decay_suspect_dates": decay_suspect_dates,
+        }
+    )
+    summary_md = build_run_summary_markdown(
+        preflight_summary=preflight,
+        block_templates=block_templates_lsoa,
+        block_instances=block_instances,
+        depot_registry=depot_registry,
+        ev_bus_specs=ev_specs,
+        vehicle_day_assignments=assignments_all,
+        assignment_diagnostics=diagnostics_all,
+        vehicle_day_soc_summary=pd.DataFrame(),
+        depot_load_15min=depot_load,
+        depot_daily_summary=depot_daily,
+        feed_year_start=start_iso,
+        feed_year_end=end_iso,
+        scenario_mode=args.scenario_mode,
+        preaggregated_stats=summary_stats,
+        soc_mode="carryover",
+    )
+    write_run_summary(summary_md, out_dir)
+    print(f"[annual_depot] wrote carryover stream outputs to {out_dir}", flush=True)
+    return _result_dict(
+        out_dir=out_dir,
+        stream=True,
+        block_templates_lsoa=block_templates_lsoa,
+        block_instances=block_instances,
+        depot_registry=depot_registry,
+        assignments=assignments_all,
+        depot_load=depot_load,
+        artifact_counts=summary_stats,
+    )
+
+
+def _write_carryover_day(
+    buffer: dict[str, Any],
+    stitch_results: dict[str, Any],
+    *,
+    state: dict[str, Any],
+    out_dir: Path,
+    depot_registry: pd.DataFrame,
+    start_iso: str,
+    stats: dict[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Finalize one buffered day and write all its partitions (checkpoint last)."""
+    service_date = str(buffer["service_date"])
+    is_warmup = bool(buffer["is_warmup"])
+    events, soc_summary, finalize_stats = finalize_day_frames(buffer["events"], buffer["soc_summary"], stitch_results, state)
+    assignments = buffer["assignments"].copy()
+    for frame in (events, soc_summary, assignments):
+        frame["is_warmup"] = is_warmup
+
+    bus_trip_records = build_bus_trip_records(events, feed_year_start=start_iso)
+    bus_charging_events = build_bus_charging_event_records(events, feed_year_start=start_iso)
+    bus_ev_state_records = build_bus_ev_state_records(events, feed_year_start=start_iso)
+
+    depot_load, depot_daily = aggregate_depot_load_15min(events, depot_registry, soc_summary)
+    if not depot_load_energy_matches_events(depot_load, events):
+        raise RuntimeError(f"Daily depot load energy mismatch for service_date={service_date}.")
+    depot_load["is_warmup"] = is_warmup
+    depot_daily["is_warmup"] = is_warmup
+
+    # Data tables: empty days simply have no partition (schema-less empty
+    # parquet would poison whole-dataset reads with null-typed columns).
+    _write_partitioned_by_service_date(events, out_dir / "vehicle_day_events")
+    _write_partitioned_by_service_date(soc_summary, out_dir / "vehicle_day_soc_summary")
+    _write_partitioned_by_service_date(bus_trip_records, out_dir / "bus_trip_records")
+    _write_partitioned_by_service_date(bus_charging_events, out_dir / "bus_charging_events")
+    _write_partitioned_by_service_date(bus_ev_state_records, out_dir / "bus_ev_state_records")
+    _write_partitioned_by_service_date(assignments, out_dir / "vehicle_day_assignments")
+    _write_partitioned_by_service_date(buffer["diagnostics"], out_dir / "vehicle_day_assignment_diagnostics")
+    _write_partitioned_by_service_date(buffer["unmatched"], out_dir / "unmatched_sampled_blocks")
+    _write_partitioned_by_service_date(depot_load, out_dir / "depot_load_15min")
+    _write_partitioned_by_service_date(depot_daily, out_dir / "depot_daily_summary")
+    # The state checkpoint (always one row per spec) is written LAST: because
+    # every other write for the day strictly precedes it, its readability alone
+    # marks the day complete for --resume.
+    _write_partitioned_by_service_date(buffer["state_frame"], out_dir / SOC_STATE_DATASET_NAME)
+
+    _add_carryover_stream_stats(
+        stats,
+        events,
+        soc_summary,
+        len(bus_trip_records),
+        len(bus_charging_events),
+        len(bus_ev_state_records),
+        depot_load,
+        is_warmup=is_warmup,
+        finalize_stats=finalize_stats,
+    )
+    return depot_load, depot_daily
+
+
+def _read_partition_or_empty(out_dir: Path, name: str, service_date: str) -> pd.DataFrame:
+    if _partition_row_count(out_dir, name, service_date) is None:
+        return pd.DataFrame()
+    return _read_partition(out_dir, name, service_date)
+
+
+def _carryover_required_datasets() -> list[str]:
+    return STREAM_DATASET_NAMES + CARRYOVER_ASSIGNMENT_DATASET_NAMES + STREAM_LOAD_DATASET_NAMES + [SOC_STATE_DATASET_NAME]
+
+
+def _prepare_carryover_output_dirs(out_dir: Path) -> None:
+    for name in _carryover_required_datasets():
+        _clear_output_path(out_dir / name)
+        _clear_output_path(out_dir / f"{name}.parquet")
+
+
+def _scan_resume_dates_carryover(out_dir: Path, service_dates: list[str]) -> tuple[list[str], list[str]]:
+    """Carryover completeness is the CONTIGUOUS prefix of fully-written days.
+
+    State threads linearly, so a hole invalidates everything after it (unlike
+    daily_reset, which tolerates arbitrary holes). The vehicle_soc_state
+    checkpoint is written strictly LAST within a day, so its readability alone
+    marks the day complete; data tables may legitimately lack a partition on a
+    zero-row day.
+    """
+    required = _carryover_required_datasets()
+    done: list[str] = []
+    for service_date in service_dates:
+        if _partition_row_count(out_dir, SOC_STATE_DATASET_NAME, service_date) is not None:
+            done.append(service_date)
+        else:
+            break
+    redo = [
+        service_date
+        for service_date in service_dates[len(done) :]
+        if any(_partition_file(out_dir, name, service_date).parent.exists() for name in required)
+    ]
+    if done:
+        # The last complete day may have been finalized by the end-of-range
+        # flush (pendings closed at their seam) instead of being stitched
+        # against its successor. Redo it unconditionally: the redo is
+        # deterministic, and its windows then stitch correctly against the
+        # day that follows in this run.
+        redo.insert(0, done.pop())
+    return done, redo
+
+
+def _clear_partition_dirs_carryover(out_dir: Path, service_dates: list[str]) -> None:
+    for service_date in service_dates:
+        for name in _carryover_required_datasets():
+            _clear_output_path(_partition_file(out_dir, name, service_date).parent)
+
+
+def _replay_completed_dates_carryover(
+    out_dir: Path,
+    done_dates: list[str],
+    stats: dict[str, Any],
+    depot_load_frames: list[pd.DataFrame],
+    depot_daily_frames: list[pd.DataFrame],
+    warmup_set: set[str],
+) -> None:
+    for index, service_date in enumerate(done_dates, start=1):
+        print(f"[annual_depot] carryover resume replay {index:,}/{len(done_dates):,}: {service_date}", flush=True)
+        events = _read_partition_or_empty(out_dir, "vehicle_day_events", service_date)
+        soc_summary = _read_partition_or_empty(out_dir, "vehicle_day_soc_summary", service_date)
+        depot_load = _read_partition_or_empty(out_dir, "depot_load_15min", service_date)
+        depot_daily = _read_partition_or_empty(out_dir, "depot_daily_summary", service_date)
+        if not depot_load_energy_matches_events(depot_load, events):
+            raise RuntimeError(f"Carryover resume replay: depot load energy mismatch for service_date={service_date}.")
+        _add_carryover_stream_stats(
+            stats,
+            events,
+            soc_summary,
+            _partition_row_count(out_dir, "bus_trip_records", service_date) or 0,
+            _partition_row_count(out_dir, "bus_charging_events", service_date) or 0,
+            _partition_row_count(out_dir, "bus_ev_state_records", service_date) or 0,
+            depot_load,
+            is_warmup=service_date in warmup_set,
+            finalize_stats=None,
+        )
+        depot_load_frames.append(depot_load)
+        depot_daily_frames.append(depot_daily)
+        del events, soc_summary, depot_load, depot_daily
+    if done_dates:
+        gc.collect()
+
+
+def _concat_partitions(out_dir: Path, name: str, service_dates: list[str]) -> pd.DataFrame:
+    frames = [
+        _read_partition(out_dir, name, service_date)
+        for service_date in service_dates
+        if _partition_row_count(out_dir, name, service_date) is not None
+    ]
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def _new_carryover_stream_stats() -> dict[str, Any]:
+    stats = _new_stream_stats()
+    stats.update(
+        {
+            "n_idle_charging_events": 0,
+            "idle_charge_kwh": 0.0,
+            "n_pre_block_windows_carryover": 0,
+            "pre_block_charge_kwh": 0.0,
+            "overnight_truncation_kwh": 0.0,
+            "n_soc_rows_excl_warmup": 0,
+            "n_soc_feasible_excl_warmup": 0,
+            "total_energy_kwh_excl_warmup": 0.0,
+            "total_charge_kwh_excl_warmup": 0.0,
+        }
+    )
+    return stats
+
+
+def _add_carryover_stream_stats(
+    stats: dict[str, Any],
+    events: pd.DataFrame,
+    soc_summary: pd.DataFrame,
+    n_bus_trip_records: int,
+    n_bus_charging_events: int,
+    n_bus_ev_state_records: int,
+    depot_load: pd.DataFrame,
+    *,
+    is_warmup: bool,
+    finalize_stats: dict[str, Any] | None = None,
+) -> None:
+    _add_stream_stats(stats, events, soc_summary, n_bus_trip_records, n_bus_charging_events, n_bus_ev_state_records, depot_load)
+    if not events.empty and {"event_type", "charge_kwh_added"}.issubset(events.columns):
+        idle_mask = events["event_type"].eq(IDLE_EVENT_TYPE)
+        stats["n_idle_charging_events"] += int(idle_mask.sum())
+        stats["idle_charge_kwh"] += float(pd.to_numeric(events.loc[idle_mask, "charge_kwh_added"], errors="coerce").fillna(0.0).sum())
+        pre_mask = events["event_type"].eq("depot_parking_pre")
+        stats["n_pre_block_windows_carryover"] += int(pre_mask.sum())
+        stats["pre_block_charge_kwh"] += float(pd.to_numeric(events.loc[pre_mask, "charge_kwh_added"], errors="coerce").fillna(0.0).sum())
+    if finalize_stats:
+        stats["overnight_truncation_kwh"] += float(finalize_stats.get("overnight_truncation_kwh", 0.0))
+    if not is_warmup:
+        stats["total_energy_kwh_excl_warmup"] += _sum_numeric(soc_summary, "total_energy_kwh")
+        stats["total_charge_kwh_excl_warmup"] += _sum_numeric(depot_load, "charge_kwh")
+        if not soc_summary.empty and "depot_only_feasible" in soc_summary.columns:
+            stats["n_soc_rows_excl_warmup"] += int(len(soc_summary))
+            stats["n_soc_feasible_excl_warmup"] += int(soc_summary["depot_only_feasible"].astype(bool).sum())
+
+
+def _finalize_carryover_stream_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    out = _finalize_stream_stats(stats)
+    n_rows_excl = int(stats.get("n_soc_rows_excl_warmup", 0))
+    out["matched_vehicle_day_feasible_share_excl_warmup"] = (
+        float(stats["n_soc_feasible_excl_warmup"] / n_rows_excl) if n_rows_excl else float("nan")
+    )
+    out["n_matched_but_walk_infeasible"] = int(stats.get("n_soc_rows", 0)) - int(stats.get("n_soc_feasible", 0))
+    load_charge = float(stats.get("load_charge_kwh", 0.0))
+    out["idle_charge_share"] = float(stats.get("idle_charge_kwh", 0.0) / load_charge) if load_charge else float("nan")
+    return out
 
 
 def _build_events_and_soc(

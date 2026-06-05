@@ -14,12 +14,30 @@ def apply_depot_only_soc(
     events: pd.DataFrame,
     *,
     depot_power_kw: float = 100.0,
+    soc_mode: str = "daily_reset",
+    soc_init_by_vehicle_day: dict[str, float] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Fill SOC/charge columns and return vehicle-day summaries.
 
     SOC is not clamped at zero. Negative SOC is preserved as an infeasibility
     diagnostic, as required by the annual depot-only prompt.
+
+    ``soc_mode="daily_reset"`` (default): every vehicle-day starts at
+    ``battery_kwh * usable_soc_max``; consecutive days are independent and
+    overlapping pre/overnight wall-clock windows are tolerated (any overlap adds
+    zero energy because the day already starts full).
+
+    ``soc_mode="carryover"`` (plan v2 §8): each vehicle-day starts at the exact
+    stitch SOC carried from the previous day via ``soc_init_by_vehicle_day``
+    (keyed by ``vehicle_day_id``). Event windows must be non-overlapping per
+    vehicle in wall-clock time (per-vehicle ledger stitching, §3.3). A missing
+    SOC state is fatal (§8.5) — it means the chronological simulation state is
+    broken — so no default is ever applied.
     """
+    if soc_mode not in ("daily_reset", "carryover"):
+        raise ValueError(f"soc_mode must be 'daily_reset' or 'carryover', got {soc_mode!r}.")
+    if soc_mode == "carryover" and soc_init_by_vehicle_day is None:
+        raise ValueError("soc_mode='carryover' requires soc_init_by_vehicle_day.")
     if events.empty:
         return events.copy(), pd.DataFrame(columns=_summary_columns())
     records: list[dict[str, Any]] = []
@@ -33,12 +51,17 @@ def apply_depot_only_soc(
         consumption = float(first.get("consumption_kwh_per_km", np.nan))
         ac_kw = float(first.get("ac_charge_kw_max", np.nan))
         valid_params = all(np.isfinite(value) and value > 0 for value in (battery_kwh, consumption, ac_kw)) and usable_min < usable_max
-        # Vehicle-days are independent in ev_stock_scale mode. A previous
-        # service day's overnight charging can overlap the next day's pre-block
-        # parking in wall-clock time, but the next day starts at usable_soc_max;
-        # any overlapping pre parking therefore adds zero energy unless a
-        # future change introduces multi-day SOC carry-over.
-        soc = battery_kwh * usable_max if valid_params else np.nan
+        if soc_mode == "carryover":
+            # Carry-over: the day starts at the stitch-point SOC inherited from
+            # the previous day's finalized window. The carried value is never
+            # floored at usable_soc_min (recovery happens only through explicit
+            # charging events, §5.2), and a missing state entry is fatal.
+            if str(vehicle_day_id) not in soc_init_by_vehicle_day:
+                raise KeyError(f"carryover: missing SOC state for vehicle_day_id={vehicle_day_id}")
+            soc = float(soc_init_by_vehicle_day[str(vehicle_day_id)]) if valid_params else np.nan
+        else:
+            soc = battery_kwh * usable_max if valid_params else np.nan
+        start_soc = soc
         min_soc = soc
         movement_energy_values: list[float] = []
         trip_energy_values: list[float] = []
@@ -94,6 +117,7 @@ def apply_depot_only_soc(
         feasible = bool(valid_params and min_soc >= battery_kwh * usable_min)
         shortfall = max(0.0, -min_soc) if valid_params else np.nan
         total_energy = float(np.nansum(movement_energy_values))
+        end_soc_ts = pd.Timestamp(group.iloc[-1]["end_datetime"]) if len(group) else pd.NaT
         summary = {
             "service_date": str(first.get("service_date")),
             "vehicle_day_id": str(vehicle_day_id),
@@ -112,6 +136,9 @@ def apply_depot_only_soc(
             "total_charge_kwh": float(total_charge),
             "min_soc_kwh": float(min_soc) if valid_params else np.nan,
             "min_soc_pct": float(min_soc_pct) if valid_params else np.nan,
+            "start_soc_kwh": float(start_soc) if valid_params else np.nan,
+            "end_soc_kwh": float(soc) if valid_params else np.nan,
+            "end_soc_ts": end_soc_ts,
             "energy_shortfall_kwh": float(shortfall) if valid_params else np.nan,
             "depot_only_feasible": feasible,
             "breaches_zero_soc": bool(valid_params and min_soc < 0.0),
@@ -178,6 +205,9 @@ def _summary_columns() -> list[str]:
         "total_charge_kwh",
         "min_soc_kwh",
         "min_soc_pct",
+        "start_soc_kwh",
+        "end_soc_kwh",
+        "end_soc_ts",
         "energy_shortfall_kwh",
         "depot_only_feasible",
         "breaches_zero_soc",

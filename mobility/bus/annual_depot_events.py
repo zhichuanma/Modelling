@@ -16,6 +16,10 @@ DEPOT_CHARGING_EVENT_TYPES = {
     "depot_parking_midday",
     "depot_parking_post",
     "depot_parking_overnight",
+    # Carry-over mode only (plan v2 §5.3/§14.4): explicit home-depot idle
+    # charging for vehicles without a duty that day; never emitted under
+    # daily_reset.
+    "idle_home_depot_charging",
 }
 MOVEMENT_EVENT_TYPES = {"depot_to_block_deadhead", "passenger_block", "passenger_trip", "block_to_depot_deadhead"}
 FORBIDDEN_CHARGING_EVENT_TYPES = {"public_charger_event", "opportunity_charging", "terminal_public_charging", "OCM_station_event"}
@@ -48,7 +52,17 @@ def build_vehicle_day_events(
     default_overnight_end_hour: float = 6.0,
     deadhead_speed_kmh: float = 30.0,
     use_trip_level_events: bool = True,
+    stitch_start_by_spec: dict[str, pd.Timestamp] | None = None,
 ) -> pd.DataFrame:
+    """Build the per-vehicle-day event ledger.
+
+    ``stitch_start_by_spec`` switches on carry-over stitching (plan v2 §3.3):
+    each vehicle's day opens at its stitch point (the previous day's pending
+    window seam) instead of service midnight, so the ``depot_parking_pre``
+    window — emitted only when the pull-out is after the seam — never overlaps
+    the previous day's overnight window. A spec missing from the map is fatal:
+    carry-over state must cover every matched vehicle.
+    """
     if assignments.empty:
         return pd.DataFrame(columns=_event_columns())
     merged = assignments.merge(block_instances, on=["service_date", "block_instance_id", "block_template_id", "agency_id", "service_id", "block_id"], how="left", suffixes=("", "_block"))
@@ -83,6 +97,7 @@ def build_vehicle_day_events(
                 default_overnight_end_hour=default_overnight_end_hour,
                 deadhead_speed_kmh=deadhead_speed_kmh,
                 use_trip_level_events=use_trip_level_events,
+                stitch_start_by_spec=stitch_start_by_spec,
             )
         )
     events = pd.DataFrame.from_records(records, columns=_event_columns())
@@ -118,7 +133,7 @@ def _apply_home_depot_override(merged: pd.DataFrame, depot_registry: pd.DataFram
     return merged
 
 
-def _events_for_vehicle_day(row: Any, *, depot_power_kw: float, default_overnight_end_hour: float, deadhead_speed_kmh: float, use_trip_level_events: bool) -> list[dict[str, Any]]:
+def _events_for_vehicle_day(row: Any, *, depot_power_kw: float, default_overnight_end_hour: float, deadhead_speed_kmh: float, use_trip_level_events: bool, stitch_start_by_spec: dict[str, pd.Timestamp] | None = None) -> list[dict[str, Any]]:
     service_date = str(getattr(row, "service_date"))
     base = {
         "service_date": service_date,
@@ -156,8 +171,17 @@ def _events_for_vehicle_day(row: Any, *, depot_power_kw: float, default_overnigh
     deadhead_start = start_dt - pd.to_timedelta(to_block_h, unit="h")
     service_midnight = pd.Timestamp(service_date)
     effective_kw = _effective_charge_kw(base["ac_charge_kw_max"], depot_power_kw)
-    if deadhead_start > service_midnight:
-        out.append(_event(base, seq, "depot_parking_pre", service_midnight, deadhead_start, depot_lat, depot_lon, depot_lat, depot_lon, depot_lsoa, depot_lsoa, 0.0, "none", True, effective_kw))
+    if stitch_start_by_spec is None:
+        window_open = service_midnight
+    else:
+        # Carry-over stitching (§3.3): the day opens at the previous pending
+        # window's seam. Missing state for a matched spec is fatal (§8.5).
+        spec_id = str(base["vehicle_spec_id"])
+        if spec_id not in stitch_start_by_spec:
+            raise KeyError(f"carryover: missing stitch start for vehicle_spec_id={spec_id}")
+        window_open = pd.Timestamp(stitch_start_by_spec[spec_id])
+    if deadhead_start > window_open:
+        out.append(_event(base, seq, "depot_parking_pre", window_open, deadhead_start, depot_lat, depot_lon, depot_lat, depot_lon, depot_lsoa, depot_lsoa, 0.0, "none", True, effective_kw))
         seq += 1
     out.append(_event(base, seq, "depot_to_block_deadhead", deadhead_start, start_dt, depot_lat, depot_lon, block_start_lat, block_start_lon, depot_lsoa, block_start_lsoa, to_block_km, "haversine_x_1.0", False, 0.0))
     seq += 1

@@ -21,6 +21,23 @@ REQUIRED_LIMITATIONS = [
     "Depots without a resolvable LSOA (opdepot_*_missing) have unknown coordinates: their deadhead is recorded as 0 km (incomplete) and their charging load is reported under unknown-depot load isolation; it must not be mapped spatially.",
 ]
 
+# Plan v2 §10.1: under carryover, the no-multi-day line is replaced by these.
+CARRYOVER_LIMITATIONS = [
+    "Models multi-day SOC carry-over using per-vehicle ledger stitching at a default operational day boundary (soc_day_boundary_hour).",
+    "SOC continuity is subject to the assumed home-depot assignment and the idle-vehicle charging policy.",
+    "Assignment feasibility uses a conservative pre-block energy screen; matched vehicle-days that end SOC-infeasible in the exact walk are retained and counted (n_matched_but_walk_infeasible).",
+    "Headline summary metrics exclude the warm-up service dates (is_warmup=True rows stay in all output tables).",
+]
+
+_DAILY_RESET_LIMITATION = "This version does not model multi-day SOC carry-over. Each vehicle-day starts at usable_soc_max."
+
+
+def limitations_for_soc_mode(soc_mode: str) -> list[str]:
+    if str(soc_mode) != "carryover":
+        return list(REQUIRED_LIMITATIONS)
+    out = [item for item in REQUIRED_LIMITATIONS if item != _DAILY_RESET_LIMITATION]
+    return out + list(CARRYOVER_LIMITATIONS)
+
 
 def build_run_summary_markdown(
     *,
@@ -41,6 +58,7 @@ def build_run_summary_markdown(
     bus_charging_events: pd.DataFrame | None = None,
     bus_ev_state_records: pd.DataFrame | None = None,
     preaggregated_stats: Mapping[str, Any] | None = None,
+    soc_mode: str = "daily_reset",
 ) -> str:
     stats = preaggregated_stats or {}
     total_charge = _sum(depot_load_15min, "charge_kwh")
@@ -61,6 +79,7 @@ def build_run_summary_markdown(
         f"- n_block_instances_annual: {len(block_instances)}",
         f"- n_ev_specs_valid: {len(ev_bus_specs)}",
         f"- scenario_mode: {scenario_mode}",
+        f"- soc_mode: {soc_mode}",
         f"- feed_year_start: {feed_year_start}",
         f"- feed_year_end: {feed_year_end}",
         f"- assignment_method: {_assignment_method(vehicle_day_assignments)}",
@@ -85,6 +104,8 @@ def build_run_summary_markdown(
         "",
         "## Unknown-depot load isolation",
         *_unknown_depot_lines(depot_load_15min, vehicle_day_assignments),
+        *_carryover_section_lines(soc_mode, stats),
+        *_calendar_decay_lines(stats),
         "",
         "## Depot confidence distribution",
     ]
@@ -108,9 +129,62 @@ def build_run_summary_markdown(
         ]
     )
     lines.extend(["", "## Main limitations"])
-    lines.extend(f"- {item}" for item in REQUIRED_LIMITATIONS)
+    lines.extend(f"- {item}" for item in limitations_for_soc_mode(soc_mode))
     lines.append("")
     return "\n".join(lines)
+
+
+def _carryover_section_lines(soc_mode: str, stats: Mapping[str, Any]) -> list[str]:
+    """Carry-over configuration & observability (plan v2 §9 run-summary fields)."""
+    if str(soc_mode) != "carryover":
+        return []
+    lines = ["", "## Carry-over configuration"]
+    for key in (
+        "soc_day_boundary_hour",
+        "warmup_days",
+        "warmup_start_date",
+        "warmup_end_date",
+        "idle_vehicle_charging_policy",
+    ):
+        if key in stats:
+            lines.append(f"- {key}: {stats[key]}")
+    for key in (
+        "n_idle_charging_events",
+        "idle_charge_kwh",
+        "idle_charge_share",
+        "n_temporal_overlap_exclusions",
+        "n_matched_but_walk_infeasible",
+        "n_pre_block_windows_carryover",
+        "pre_block_charge_kwh",
+        "overnight_truncation_kwh",
+        "total_charge_kwh_excl_warmup",
+        "total_energy_kwh_excl_warmup",
+        "matched_vehicle_day_feasible_share_excl_warmup",
+    ):
+        if key in stats:
+            value = stats[key]
+            lines.append(f"- {key}: {_format_float(value) if isinstance(value, float) else value}")
+    lines.append("- note: headline metrics above include warm-up days; the *_excl_warmup restatements are the §14.5 reporting basis.")
+    return lines
+
+
+def _calendar_decay_lines(stats: Mapping[str, Any]) -> list[str]:
+    """GTFS feed-tail coverage caveat (plan v2 §15): flag suspiciously thin dates."""
+    if "calendar_decay_suspect_dates" not in stats:
+        return []
+    suspect = list(stats.get("calendar_decay_suspect_dates") or [])
+    lines = ["", "## Calendar-coverage caveat"]
+    if "calendar_decay_median_active_blocks" in stats:
+        lines.append(f"- median_active_block_instances_per_date: {stats['calendar_decay_median_active_blocks']}")
+    if "calendar_decay_floor" in stats:
+        lines.append(f"- coverage_floor (flag below): {stats['calendar_decay_floor']}")
+    if suspect:
+        lines.append(f"- n_calendar_decay_suspect_dates: {len(suspect)}")
+        lines.append(f"- calendar_decay_suspect_dates: {', '.join(str(item) for item in suspect[:20])}{' ...' if len(suspect) > 20 else ''}")
+        lines.append("- caveat: loads on flagged dates reflect GTFS calendar expiry, not real seasonality; do not read them as demand.")
+    else:
+        lines.append("- none within the run window (feed-tail decay handled by the run-window truncation).")
+    return lines
 
 
 def write_run_summary(markdown: str, out_dir: str | Path) -> Path:
@@ -233,7 +307,11 @@ def _unmatched_reason_lines(diagnostics: pd.DataFrame | None) -> list[str]:
         lines.append(f"- n_unmatched_sampled_blocks_no_feasible_vehicle: {n_no_feasible}")
         radius_parts = [
             (column, int(_diagnostics_sum(diagnostics, column)))
-            for column in ("n_unmatched_no_vehicle_in_radius", "n_unmatched_no_feasible_vehicle_in_radius")
+            for column in (
+                "n_unmatched_no_vehicle_in_radius",
+                "n_unmatched_no_feasible_vehicle_in_radius",
+                "n_unmatched_vehicle_busy_overnight",
+            )
             if column in diagnostics.columns
         ]
         if any(count for _, count in radius_parts):
@@ -325,4 +403,10 @@ def _top_blocks_by_shortfall_from_stats(stats: Mapping[str, Any]) -> list[str] |
     return out or ["- none"]
 
 
-__all__ = ["REQUIRED_LIMITATIONS", "build_run_summary_markdown", "write_run_summary"]
+__all__ = [
+    "CARRYOVER_LIMITATIONS",
+    "REQUIRED_LIMITATIONS",
+    "build_run_summary_markdown",
+    "limitations_for_soc_mode",
+    "write_run_summary",
+]

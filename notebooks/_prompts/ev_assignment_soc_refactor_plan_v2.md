@@ -1244,3 +1244,58 @@ acceptance analysis (`outputs/_analysis/pr1_vs_main/`). Fix 3 changes simulated
 load: whether the three runs need a rerun depends on the empirically measured
 magnitude (D7 of the acceptance analysis quantifies affected vehicle-days and
 missing kWh); otherwise it lands with the PR 2 rerun anyway.
+
+## 17. PR 2 implementation record (2026-06-05)
+
+PR 2 (`--soc-mode carryover`) implemented per §3.3/§5/§8/§9/§10/§14/§15, with
+two decisions taken at implementation time (user-approved 2026-06-05):
+
+1. **Seam semantics ("06:00 seam + pre window")**: the previous day's window
+   ends at `min(seam_end, next-day first event start)` where `seam_end` is the
+   event-stage overnight end (default boundary, or late-return fallback
+   `return_dt + default_overnight_end_hour`). When the next pull-out is after
+   the seam, the next day owns a `depot_parking_pre` window
+   `[seam_end, deadhead_start]`. Every wall-clock instant has exactly one
+   owning event; charge opportunity is equivalent to daily_reset (no §3.3
+   strict-min charging gap). Rationale: load attribution per service_date stays
+   consistent with the established slot_date/service_date semantics.
+2. **No separate `screen_optimism_realized` column**: on matched vehicle-days
+   it is redundant with `NOT depot_only_feasible`; the run summary reports
+   `n_matched_but_walk_infeasible` instead (3-day real-data smoke: 102/13,398
+   = 0.76%, i.e. the conservative screen is rarely wrong).
+
+Mechanics:
+- **Lag-one finalize**: day N's overnight/idle windows are finalized against
+  day N+1's BUILT first events (no estimate drift), so day N's partitions are
+  written at the start of iteration N+1; the per-spec `vehicle_soc_state`
+  checkpoint partition is written strictly last and its readability alone marks
+  the day complete.
+- **State machine** in `mobility/bus/annual_soc_state.py`: every valid spec
+  carries exactly one open pending window per day (duty overnight or idle at
+  the home depot); idle events are emitted only when they add energy; SOC below
+  usable_min carries unfloored (§5.2) and recovers only through explicit
+  charging events. `--idle-vehicle-charging-policy none` keeps the window with
+  zero power.
+- **Assignment in-loop**: `assign_vehicle_days_for_date` (extracted from
+  `build_feasible_vehicle_day_assignments`; daily_reset output verified
+  byte-identical against the pre-refactor code) takes `available_kwh_by_spec`
+  (state projection to the seam, replaces battery*(max-min)) and
+  `available_from_by_spec` (temporal guard; new unmatched sub-reason
+  `vehicle_busy_overnight` under the no_feasible bucket).
+- **Resume**: contiguous-prefix scan on `vehicle_soc_state` checkpoints; the
+  last complete day is always redone (its finalization may have been an
+  end-of-range seam flush rather than a true next-day stitch); per-date stable
+  seeds make the redo bit-identical. Golden test: 4 synthetic days in one run
+  vs 2 days + kill + resume produce byte-identical partitions across all 11
+  datasets including vehicle_soc_state.
+- **Warmup/feed-tail**: `is_warmup` column (runner-side, first
+  `--warmup-days` service dates) on events/soc/assignments/load/daily/state;
+  headline metrics restated warmup-excluded; per-date `calendar_decay_suspect`
+  flag (active blocks < 50% of window median) + run-summary caveat section.
+- daily_reset remains the default and is untouched (regression-anchored).
+
+Validation: 62 new tests + 286-test bus suite green (5 pre-existing
+data-dependent legacy failures unrelated); 3-day real-data smoke (MAIN config)
+clean — energy identity holds on every day, 4,466 matched vehicle-days/day,
+idle charge 0.44% of load, 11,321 pre-block windows (52.4 MWh), overnight
+truncation 44.3 MWh, busy-overnight exclusions 325.
