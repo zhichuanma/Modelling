@@ -15,6 +15,7 @@ generated outputs stay local and are not tracked by git.
 - `mobility/bus/`: bus-oriented preprocessing and fleet simulation helpers
 - `mobility/coach/`: coach parsing utilities
 - `notebooks/`: exploratory and workflow notebooks
+- `docs/`: current notes, prompt archive, and historical review records
 - `pyproject.toml`: package metadata for editable installs
 
 ## Repository Layout
@@ -27,6 +28,7 @@ Modelling/
 |   |-- bus/
 |   `-- coach/
 |-- notebooks/
+|-- docs/
 |-- data/        # local only, not versioned
 |-- output/      # local only, not versioned
 |-- outputs/     # local only, not versioned
@@ -89,10 +91,15 @@ print(em.STEP_HOURS)
 
 For workflow examples, start from the notebooks:
 
-- `notebooks/01_data_exploration.ipynb`
-- `notebooks/02_fleet_simulation.ipynb`
-- `notebooks/03_bus_mobility.ipynb`
-- `notebooks/04_coach_txc_to_trip_table.ipynb`
+- `notebooks/00_single_car_simulation.ipynb`
+- `notebooks/01_single_bus_simulation.ipynb`
+- `notebooks/02_single_coach_simulation.ipynb`
+- `notebooks/03_bus_annual_walkthrough.ipynb`
+- `notebooks/04_coach_annual_simulation.ipynb`
+- `notebooks/05_bus_annual_results.ipynb`
+
+Current design notes and archived task prompts live under `docs/`. New prompts
+should not be added under `notebooks/_prompts/`.
 
 ## Notes
 

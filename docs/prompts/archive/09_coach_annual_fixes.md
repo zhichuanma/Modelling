@@ -20,7 +20,7 @@
 
 ## Task 1 — Chain template 用 journey-set hash 而不是 chain_index
 
-**问题**：[mobility/coach/chain_builder.py:137-156](../../mobility/coach/chain_builder.py#L137-L156) 当前 `coach_chain_template_id = f"{operator_code}_{chain_index:03d}"`。两个日期上 first-fit 都把"第 1 条 chain"标成 `_001`，但两条 chain 的 journey 组合可能不同（bank holiday / 学期变化导致 J2 缺席、J3 替补）。然后 [annual_simulation.py:236-243](../../mobility/coach/annual_simulation.py#L236-L243) 的 `_chain_template` 对同一 template_id 跨日期 `drop_duplicates("journey_id")` 并集，silently 把不同组合合并成一个 super-chain → over-count demand。
+**问题**：[mobility/coach/chain_builder.py:137-156](../../../mobility/coach/chain_builder.py#L137-L156) 当前 `coach_chain_template_id = f"{operator_code}_{chain_index:03d}"`。两个日期上 first-fit 都把"第 1 条 chain"标成 `_001`，但两条 chain 的 journey 组合可能不同（bank holiday / 学期变化导致 J2 缺席、J3 替补）。然后 [annual_simulation.py:236-243](../../../mobility/coach/annual_simulation.py#L236-L243) 的 `_chain_template` 对同一 template_id 跨日期 `drop_duplicates("journey_id")` 并集，silently 把不同组合合并成一个 super-chain → over-count demand。
 
 **修复决策**：用 journey-set hash 作为 template 身份，drop chain_index。
 
@@ -37,7 +37,7 @@
   - `coach_chain_id = f"{operator_code}_{active_date.isoformat()}_{chain_index:03d}"`——保持不变，作为 daily instance label。
   - `coach_chain_template_id = f"{operator_code}_{journey_set_hash}"`——**不再含 chain_index**；两个日期上 journey set 相同 → 同 template_id；不同 → 不同 template_id。
 
-- 在 `_chain_template` ([annual_simulation.py:236-243](../../mobility/coach/annual_simulation.py#L236-L243)) 顶部加 defensive 断言：
+- 在 `_chain_template` ([annual_simulation.py:236-243](../../../mobility/coach/annual_simulation.py#L236-L243)) 顶部加 defensive 断言：
   ```python
   per_date_sets = group.groupby("date")["journey_id"].agg(lambda s: tuple(sorted(s.astype(str))))
   if per_date_sets.nunique() > 1:
@@ -52,13 +52,13 @@
   - 断言：D1 的 template_id != D2 的 template_id；两个 chain_index 都是 001 但 template_id 不同。
   - 同时保留现有 3 个测试不变（它们当前用的 chain_index=1 单日期，hash 化后 template_id 形状变了，断言要相应更新——`"OP_001"` 改成 hash 形式或改 startswith 检查）。
 
-- 更新 [test_chain_builder.py:55](../../tests/coach/test_chain_builder.py#L55) 那条 `set(chains["coach_chain_template_id"]) == {"OP_001", "OP_002"}` 的硬编码断言，改成"两个 template_id 不同 且都 startswith 'OP_'"。
+- 更新 [test_chain_builder.py:55](../../../tests/coach/test_chain_builder.py#L55) 那条 `set(chains["coach_chain_template_id"]) == {"OP_001", "OP_002"}` 的硬编码断言，改成"两个 template_id 不同 且都 startswith 'OP_'"。
 
 ---
 
 ## Task 2 — Warmup 与 bus 完全一致
 
-**问题**：[annual_simulation.py:84-122](../../mobility/coach/annual_simulation.py#L84-L122) 的 `_simulate_with_active_warmup` 在 active schedules 上窗口化、用 `warm_up_days=0` 双调用——不是 bus 的 idiom。bus 在 [bus/annual_simulation.py:89-124](../../mobility/bus/annual_simulation.py#L89-L124) 用 calendar-day 窗口 + simulator 内置 `warm_up_days` 参数。
+**问题**：[annual_simulation.py:84-122](../../../mobility/coach/annual_simulation.py#L84-L122) 的 `_simulate_with_active_warmup` 在 active schedules 上窗口化、用 `warm_up_days=0` 双调用——不是 bus 的 idiom。bus 在 [bus/annual_simulation.py:89-124](../../../mobility/bus/annual_simulation.py#L89-L124) 用 calendar-day 窗口 + simulator 内置 `warm_up_days` 参数。
 
 **修复决策**：直接镜像 bus 的 `_simulate_with_annual_warmup`。
 
@@ -119,11 +119,11 @@
 
 ## Task 3 — Depot vs layover 充电策略与 bus 一致
 
-**问题**：[year_schedule.py:86-138](../../mobility/coach/year_schedule.py#L86-L138) 的 `_attach_chain_parking` 把同一天 trip 之间的 inter-journey dwell 与首尾 dwell 统统标 `terminus_dwell` + `can_charge=True` + `terminus_charge_kw`。允许 first-fit 50 km 换位的 chain 上，下午 4 小时 mid-route dwell 直接被记为 200 kWh 充电——模型乐观且与 bus 不一致。bus 在 [bus/year_schedule.py:180-249](../../mobility/bus/year_schedule.py#L180-L249) 区分 `depot_terminus`（首/尾/inactive 全天）vs `layover`（trip 间），后者默认 `can_charge=False`。
+**问题**：[year_schedule.py:86-138](../../../mobility/coach/year_schedule.py#L86-L138) 的 `_attach_chain_parking` 把同一天 trip 之间的 inter-journey dwell 与首尾 dwell 统统标 `terminus_dwell` + `can_charge=True` + `terminus_charge_kw`。允许 first-fit 50 km 换位的 chain 上，下午 4 小时 mid-route dwell 直接被记为 200 kWh 充电——模型乐观且与 bus 不一致。bus 在 [bus/year_schedule.py:180-249](../../../mobility/bus/year_schedule.py#L180-L249) 区分 `depot_terminus`（首/尾/inactive 全天）vs `layover`（trip 间），后者默认 `can_charge=False`。
 
 **修复决策**：把 bus 的位置语义照搬。不依赖 LSOA 字段——纯按"在 chain 一天的时间位置"决定 purpose。
 
-- 修改 `chain_to_year_schedules` 签名（[year_schedule.py:141-149](../../mobility/coach/year_schedule.py#L141-L149)），新增三个 kw-only 参数：
+- 修改 `chain_to_year_schedules` 签名（[year_schedule.py:141-149](../../../mobility/coach/year_schedule.py#L141-L149)），新增三个 kw-only 参数：
   ```python
   def chain_to_year_schedules(
       chain_journeys: pd.DataFrame,
@@ -138,20 +138,20 @@
       min_layover_for_charging_h: float = 0.0,          # 新增
   ) -> list[DailySchedule]:
   ```
-- 重写 `_attach_chain_parking` ([year_schedule.py:86-138](../../mobility/coach/year_schedule.py#L86-L138))：
+- 重写 `_attach_chain_parking` ([year_schedule.py:86-138](../../../mobility/coach/year_schedule.py#L86-L138))：
   - **No trips on this day**（inactive day）→ purpose=`"depot_terminus"`、`can_charge=True`、`charge_power_kw=terminus_charge_kw`、full 0–24h。与现状等价。
   - **Pre-journey dwell**（一天第一段 trip 之前）→ purpose=`"depot_terminus"`、`can_charge=True`、`charge_power_kw=terminus_charge_kw`。
   - **Inter-journey dwell**（同一天连续 trip 之间）→ purpose=`"layover"`、`can_charge = bool(allow_layover_charging and duration_h >= min_layover_for_charging_h)`、`charge_power_kw = layover_charge_kw if can_charge else 0.0`。
   - **Post-journey dwell**（一天最后一段 trip 之后）→ purpose=`"depot_terminus"`、`can_charge=True`、`charge_power_kw=terminus_charge_kw`。
   - 注意：参数 `terminus_dwell_purpose` 现在默认 `"depot_terminus"`（不再是 `"terminus_dwell"`）。这是为了与 bus 的 string 完全对齐——下游 `_parking_load_energy_kwh` 之类按 purpose 字串聚合时不会错位。
-- 在 `simulate_coach_chain_year` ([annual_simulation.py:150-226](../../mobility/coach/annual_simulation.py#L150-L226)) 签名末尾新增 `allow_layover_charging / layover_charge_kw / min_layover_for_charging_h` 三个 kw-only 参数，pass-through 到 `chain_to_year_schedules`。
-- 在 `simulate_coach_fleet_year` ([annual_simulation.py:263-345](../../mobility/coach/annual_simulation.py#L263-L345)) 同样 pass-through（通过 `**kw`，但默认值要在 fleet wrapper 显式声明）。
+- 在 `simulate_coach_chain_year` ([annual_simulation.py:150-226](../../../mobility/coach/annual_simulation.py#L150-L226)) 签名末尾新增 `allow_layover_charging / layover_charge_kw / min_layover_for_charging_h` 三个 kw-only 参数，pass-through 到 `chain_to_year_schedules`。
+- 在 `simulate_coach_fleet_year` ([annual_simulation.py:263-345](../../../mobility/coach/annual_simulation.py#L263-L345)) 同样 pass-through（通过 `**kw`，但默认值要在 fleet wrapper 显式声明）。
 - 在 `scripts/run_coach_annual_pipeline.py` argparse 新增：
   - `--allow-layover-charging` (action="store_true", default=False)
   - `--layover-charge-kw` (type=float, default=0.0)
   - `--min-layover-for-charging-h` (type=float, default=0.0)
   并 plumb 进 `simulate_coach_fleet_year` 调用。
-- **现有测试预期回归**：[test_annual_simulation.py:77](../../tests/coach/test_annual_simulation.py#L77) 的 `energy_charged_kwh > 0.0` 在新默认下仍成立（因为首尾 dwell 仍充电），但 mid-trip 那 4 小时不再充电——`per_chain.loc[0, "energy_charged_kwh"]` 的 numeric 值会下降。如果有任何测试断言具体能量数值（非 > 0），需要更新。
+- **现有测试预期回归**：[test_annual_simulation.py:77](../../../tests/coach/test_annual_simulation.py#L77) 的 `energy_charged_kwh > 0.0` 在新默认下仍成立（因为首尾 dwell 仍充电），但 mid-trip 那 4 小时不再充电——`per_chain.loc[0, "energy_charged_kwh"]` 的 numeric 值会下降。如果有任何测试断言具体能量数值（非 > 0），需要更新。
 - 新增测试 `tests/coach/test_year_schedule.py::test_layover_default_does_not_charge_and_opt_in_does`：
   - chain：J1 (8–10h, 80 km), J2 (14–16h, 80 km)。
   - 默认（`allow_layover_charging=False`）：
@@ -164,21 +164,21 @@
 - 新增测试 `tests/coach/test_annual_simulation.py::test_layover_off_lowers_energy_charged_vs_on`：
   - 同 chain 跑两次，一次默认、一次 `allow_layover_charging=True / layover_charge_kw=50`。
   - 断言 `energy_charged_kwh_layover_on > energy_charged_kwh_layover_off`。
-- 现有 `test_year_schedule.py::test_chain_to_year_schedules_has_active_and_inactive_days` ([test_year_schedule.py:38](../../tests/coach/test_year_schedule.py#L38)) 那条 `event.location_purpose == "terminus_dwell"` 断言要改成 `"depot_terminus"`。
+- 现有 `test_year_schedule.py::test_chain_to_year_schedules_has_active_and_inactive_days` ([test_year_schedule.py:38](../../../tests/coach/test_year_schedule.py#L38)) 那条 `event.location_purpose == "terminus_dwell"` 断言要改成 `"depot_terminus"`。
 
 ---
 
 ## Task 4 — 跨午夜 + 年末 overflow + strict SoC 连续性
 
-**问题 4a**：[year_schedule.py:183-184](../../mobility/coach/year_schedule.py#L183-L184) 在 `target_date not in schedules` 时 silently `continue`——年末日的跨午夜 journey 的 day=1 segment 直接消失。能耗、距离、SoC 衰减全丢。
+**问题 4a**：[year_schedule.py:183-184](../../../mobility/coach/year_schedule.py#L183-L184) 在 `target_date not in schedules` 时 silently `continue`——年末日的跨午夜 journey 的 day=1 segment 直接消失。能耗、距离、SoC 衰减全丢。
 
-**问题 4b**：[test_annual_simulation.py:96](../../tests/coach/test_annual_simulation.py#L96) 的 `abs(soc[N] - soc[N-1]) < 0.05` 阈值是单段 trip 总能耗的量级，挡不住 1 小时窗口丢失级别的 bug——SoC 连续性实际并未被证实。
+**问题 4b**：[test_annual_simulation.py:96](../../../tests/coach/test_annual_simulation.py#L96) 的 `abs(soc[N] - soc[N-1]) < 0.05` 阈值是单段 trip 总能耗的量级，挡不住 1 小时窗口丢失级别的 bug——SoC 连续性实际并未被证实。
 
 **修复决策**：内部扩展 1 天，输出仍 365 天；测试改成 strict 梯度连续。
 
 ### 4a — 扩展 schedules 至 366 天，输出 crop 回 365
 
-修改 `chain_to_year_schedules` ([year_schedule.py:141-207](../../mobility/coach/year_schedule.py#L141-L207))：
+修改 `chain_to_year_schedules` ([year_schedule.py:141-207](../../../mobility/coach/year_schedule.py#L141-L207))：
 
 - `dates = annual_dates()` 后再 append 一天：
   ```python
@@ -191,7 +191,7 @@
   - 若该天 trips 为空：仍**不**注入 inactive day 的 24h depot dwell（避免凭空多 24 小时充电）。`schedule.parking_events = []`。
 - 函数仍返回 366-day list；调用方负责 crop。在 metadata 标记 `is_overflow_day = (date == internal_dates[-1])`。
 
-修改 `simulate_coach_chain_year` ([annual_simulation.py:150-226](../../mobility/coach/annual_simulation.py#L150-L226))：
+修改 `simulate_coach_chain_year` ([annual_simulation.py:150-226](../../../mobility/coach/annual_simulation.py#L150-L226))：
 
 - `chain_to_year_schedules` 返回 366 天后，`_simulate_with_annual_warmup` 接收的就是 366 天。
 - `simulate_single_ev` 输出 `soc/load_kw` 长度 = `366 × STEPS_PER_DAY_DECISION`。
@@ -210,13 +210,13 @@
   方便 audit。
 - 在 result dict 加 `n_schedule_days = len(schedules)`（366）和 `n_output_days = len(annual_dates())`（365），与 bus 风格一致。
 
-修改 `_load_profile_frame` ([annual_simulation.py:246-260](../../mobility/coach/annual_simulation.py#L246-L260))：
+修改 `_load_profile_frame` ([annual_simulation.py:246-260](../../../mobility/coach/annual_simulation.py#L246-L260))：
 
 - 现在 `load_kw.shape[0]` 应该是 `365 × STEPS`（crop 后）。当前断言保留即可，但 `dates = annual_dates()` 仍是 365 天——schema 不变。
 
 ### 4b — Strict cross-midnight 测试
 
-更新 [test_annual_simulation.py:81-96](../../tests/coach/test_annual_simulation.py#L81-L96) `test_cross_midnight_chain_soc_is_continuous_at_day_boundary`：
+更新 [test_annual_simulation.py:81-96](../../../tests/coach/test_annual_simulation.py#L81-L96) `test_cross_midnight_chain_soc_is_continuous_at_day_boundary`：
 
 - 当前阈值 `< 0.05` 改为 strict 梯度连续：
   ```python
@@ -275,7 +275,7 @@ def test_year_end_cross_midnight_overflow_preserves_soc_and_energy() -> None:
 
 ### 5b — Per-LSOA layover eligibility 在 `_attach_chain_parking` 内生效
 
-修改 [year_schedule.py:86-138](../../mobility/coach/year_schedule.py#L86-L138) 的 `_attach_chain_parking`：
+修改 [year_schedule.py:86-138](../../../mobility/coach/year_schedule.py#L86-L138) 的 `_attach_chain_parking`：
 
 - 新增 kw-only 参数 `eligible_layover_lsoas: set[str] | None = None`。
 - 行为：
@@ -467,7 +467,7 @@ None.
 - 不修 `mobility/coach/sim_adapter.py / trip_chain_coach.py / feasibility.py / coach_fleet.py / selection.py / data_loader.py / distance.py / stop_geometry.py / build_all_journeys.py` 既有代码。`stop_geometry.py` 的 `attach_lsoa_to_journeys`（Task 5 加的）也不动。
 - 不引入 utilization / queueing。
 - 不引入 layover 充电的默认开启——bus 默认是关的，coach 跟一样。
-- 不改 [scripts/run_coach_pipeline.py](../../scripts/run_coach_pipeline.py) 的 v1 single-journey 入口。
+- 不改 [scripts/run_coach_pipeline.py](../../../scripts/run_coach_pipeline.py) 的 v1 single-journey 入口。
 - 不引入新的外部依赖（`hashlib` 是标准库）。
 - 不在 ParkingEvent 加新字段（如果非要 audit 就放 schedule.metadata）。
 - 不删 `_simulate_with_active_warmup` 之外的既有函数。
