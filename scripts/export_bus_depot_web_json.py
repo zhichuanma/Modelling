@@ -30,6 +30,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-dir", type=Path, default=Path("~/Work/Nature_EV_2025/outputs/bus_annual_depot_load_carryover"))
     parser.add_argument("--out-dir", type=Path, default=Path("~/Work/Nature_EV_2025/outputs/web_export_depot_bus"))
     parser.add_argument("--min-annual-kwh", type=float, default=1.0)
+    # Mode parameterization (defaults preserve the bus export layout byte-for-byte
+    # apart from the now-computed dates_without_data_note / warmup-count caveat).
+    parser.add_argument("--dataset", default="bus_depot_charging_load", help="Index 'dataset' label (coach: coach_depot_charging_load).")
+    parser.add_argument("--fragments-subdir", default="depot_bus_fragments")
+    parser.add_argument("--index-name", default="depot_bus_index.json")
+    parser.add_argument("--depots-csv-name", default="Depots.csv", help="Coach should use Depots_coach.csv so the merge does not overwrite the bus CSV in web data/.")
+    parser.add_argument("--extra-caveats", nargs="*", default=[], help="Appended to the index caveats list (e.g. first-fit-chains, calendar-decay notes).")
     return parser.parse_args()
 
 
@@ -46,7 +53,7 @@ def main() -> None:
     args = parse_args()
     run_dir = _resolve(args.run_dir)
     out_dir = _resolve(args.out_dir)
-    fragments_dir = out_dir / "depot_bus_fragments"
+    fragments_dir = out_dir / args.fragments_subdir
     fragments_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[web_export] reading {run_dir}/depot_load_15min.parquet", flush=True)
@@ -136,16 +143,20 @@ def main() -> None:
             }
         )
     mappable_share = float(stats.loc[stats["mappable"], "annual_charge_kwh"].sum() / stats["annual_charge_kwh"].sum())
+    dates_with_data = sorted(target_for.values())
+    all_2025 = pd.date_range("2025-01-01", "2025-12-31", freq="D").strftime("%Y-%m-%d")
+    dates_without_data = sorted(set(all_2025) - set(dates_with_data))
     index_payload = {
-        "dataset": "bus_depot_charging_load",
+        "dataset": args.dataset,
         "source_run": str(run_dir),
         "soc_mode": "carryover",
         "time_steps_per_day": STEPS_PER_DAY,
         "step_minutes": 30,
         "value_unit": "avg_kw_per_half_hour",
         "date_mapping": "month_day_alignment_to_2025",
-        "dates_with_data": sorted(target_for.values()),
-        "dates_without_data_note": "2025-01-22..2025-04-16 falls outside the GTFS feed window; their depots block is empty.",
+        "dates_with_data": dates_with_data,
+        "dates_without_data_note": f"{len(dates_without_data)} 2025 dates fall outside the source feed window; their depots block is empty.",
+        "dates_without_data": dates_without_data,
         "warmup_dates": warmup_targets,
         "n_depots": len(depots_index),
         "n_mappable_depots": int(stats["mappable"].sum()),
@@ -153,14 +164,15 @@ def main() -> None:
         "caveats": [
             "Depot anchors are inferred from block terminals, not verified physical garages.",
             "mappable=false depots (opdepot_*_missing) have no resolvable coordinates; list them, never place them on the map.",
-            "warmup_dates correspond to the 14 warm-up service days; badge or exclude them in annual aggregates.",
-            "Weekday alignment is not preserved by the month-day mapping (a 2025 Saturday may show a bus Friday curve).",
+            f"warmup_dates correspond to the {len(warmup_targets)} warm-up wall-clock days; badge or exclude them in annual aggregates.",
+            "Weekday alignment is not preserved by the month-day mapping (a 2025 Saturday may show a source-feed Friday curve).",
             "source_date inside each day file records the original simulation day for traceability.",
+            *[str(c) for c in args.extra_caveats],
         ],
         "depots": depots_index,
     }
-    (out_dir / "depot_bus_index.json").write_text(json.dumps(index_payload, ensure_ascii=True, indent=1), encoding="utf-8")
-    pd.DataFrame(depots_index).to_csv(out_dir / "Depots.csv", index=False)
+    (out_dir / args.index_name).write_text(json.dumps(index_payload, ensure_ascii=True, indent=1), encoding="utf-8")
+    pd.DataFrame(depots_index).to_csv(out_dir / args.depots_csv_name, index=False)
     total_mb = sum(f.stat().st_size for f in fragments_dir.glob("*.json")) / 1e6
     print(f"[web_export] fragments total {total_mb:.1f} MB; index + Depots.csv written to {out_dir}", flush=True)
 

@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-html", type=Path, default=None, help="Default: <run-dir>/depot_load_map.html")
     parser.add_argument("--include-warmup", action="store_true", help="Keep is_warmup=True rows (excluded by default).")
     parser.add_argument("--min-annual-kwh", type=float, default=1.0, help="Drop mapped depots below this annual charge.")
+    parser.add_argument("--title", default="Bus depot charging load — annual carryover run", help="HTML page title (e.g. for the coach run).")
     return parser.parse_args()
 
 
@@ -138,6 +139,7 @@ def main() -> None:
         )
 
     meta = {
+        "title": str(args.title),
         "run_dir": str(run_dir),
         "total_charge_kwh": round(total_kwh, 1),
         "mapped_charge_kwh": round(total_kwh - unknown_kwh, 1),
@@ -158,12 +160,12 @@ def main() -> None:
 
 def _render_html(depots: list[dict], meta: dict) -> str:
     data_json = json.dumps({"depots": depots, "meta": meta}, separators=(",", ":"))
-    return (
+    html = (
         """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<title>Bus depot charging load — annual carryover run</title>
+<title>__PAGE_TITLE__</title>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -261,6 +263,7 @@ legend.addTo(map);
 </html>
 """
     )
+    return html.replace("__PAGE_TITLE__", str(meta.get("title", "Depot charging load")))
 
 
 if __name__ == "__main__":
