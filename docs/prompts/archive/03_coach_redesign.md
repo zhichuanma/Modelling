@@ -4,7 +4,7 @@
 
 `mobility/coach/` 目前只有一个 `txc_parser.py`（575 行，已稳定）和一个空 `__init__.py`。它能把 TransXChange XML 解析成 trip table（一行一 vehicle journey, 25 列），但缺仿真所需的物理量。任务是按 [01_bus_redesign.md](01_bus_redesign.md) 已经验证有效的纪律给 coach 加完整的"trip → DailySchedule → SOC"流水线 + 单 coach 叙事 notebook。
 
-继承约束：仓库根 [AGENTS.md](../../../AGENTS.md) 全部硬规则（单位后缀 / RNG / parquet / 不引入 `holidays/geopandas/pyproj`）。本 PR **不允许改 `txc_parser.py`**——它经过手工调过，是稳定基座。所有新逻辑落在新模块。
+继承约束：仓库根 [AGENTS.md](../../../../AGENTS.md) 全部硬规则（单位后缀 / RNG / parquet / 不引入 `holidays/geopandas/pyproj`）。本 PR **不允许改 `txc_parser.py`**——它经过手工调过，是稳定基座。所有新逻辑落在新模块。
 
 冻结资源：
 
@@ -38,7 +38,7 @@
 
 ### 1.1 距离完全没有，必须外挂 NaPTAN
 
-[txc_parser.py:149-162](../../mobility/coach/txc_parser.py) 的 `parse_stop_points` 只产出 `stop_point_ref / common_name / indicator / locality_*`——TxC 不带坐标。新模块必须：
+[txc_parser.py:149-162](../../../mobility/coach/txc_parser.py) 的 `parse_stop_points` 只产出 `stop_point_ref / common_name / indicator / locality_*`——TxC 不带坐标。新模块必须：
 
 - 加载 NaPTAN（`Modelling/data/naptan_stops.csv`）+ custom stops（`TxC-2.4/CustomStopsList17APR26.csv`）合成统一的 stop→(lat, lon) 表
 - 优先用 NaPTAN，custom stops 兜底（custom 是 NaPTAN 没收录的 coach 站）
@@ -71,7 +71,7 @@ YUTONG TC12  range~347 km → 80% of journeys feasible
 YUTONG GTE14 range~483 km → 92% of journeys feasible
 ```
 
-绝大多数 coach 跑得完。但仿真器 `_soc_walk` 在 SOC < 0 时静默 clamp 到 0 继续跑（[mobility/core/simulator.py:251-253](../../mobility/core/simulator.py#L251)），所以**不可行的 10–20% 路线不会报错，会给出虚假的 `soc_end`**——必须显式拦截。
+绝大多数 coach 跑得完。但仿真器 `_soc_walk` 在 SOC < 0 时静默 clamp 到 0 继续跑（[mobility/core/simulator.py:251-253](../../../mobility/core/simulator.py#L251)），所以**不可行的 10–20% 路线不会报错，会给出虚假的 `soc_end`**——必须显式拦截。
 
 新增 `feasibility.py`，提供：
 
@@ -98,7 +98,7 @@ bus 的 depot_terminus 是首末 stop 的占位抽象。coach 通常**真的**�
 
 ### 1.6 Operating profile = 字符串，不展开日期
 
-[txc_parser.py:92-127](../../mobility/coach/txc_parser.py#L92) 的 `_parse_operating_profile` 已经把 `RegularDayType` 提取成字符串（`"DaysOfWeek"` 这种），把 `SpecialDaysOperation` 的日期范围列出来。本 PR **不展开日期**——和 bus 一样停在"a representative service day"层级。identity card 不允许出现 `date` 字段，`operating_profile` 字段保留原始字符串供读者参考。
+[txc_parser.py:92-127](../../../mobility/coach/txc_parser.py#L92) 的 `_parse_operating_profile` 已经把 `RegularDayType` 提取成字符串（`"DaysOfWeek"` 这种），把 `SpecialDaysOperation` 的日期范围列出来。本 PR **不展开日期**——和 bus 一样停在"a representative service day"层级。identity card 不允许出现 `date` 字段，`operating_profile` 字段保留原始字符串供读者参考。
 
 ---
 
@@ -215,7 +215,7 @@ def journey_to_daily_schedules(
 
 ### 2.5 `coach_fleet.py` (新增) + `sim_adapter.py`
 
-新增 `coach_fleet.py`，类比 [mobility/cars/data_loader.py](../../mobility/cars/data_loader.py)：
+新增 `coach_fleet.py`，类比 [mobility/cars/data_loader.py](../../../mobility/cars/data_loader.py)：
 
 ```python
 COACH_FLEET_PATH = Path(__file__).resolve().parents[2] / "data" / "EV_UK_LSOA_2025_with_energy.csv"
@@ -371,7 +371,7 @@ from .feasibility import journey_feasibility
 
 ## 4. Notebook — `notebooks/02_single_coach_simulation.ipynb`
 
-配套 builder `_build_02_coach_narrative.py`，与 [_build_01_bus_narrative.py](../_build_01_bus_narrative.py) 同结构。
+配套 builder `_build_02_coach_narrative.py`，与 [_build_01_bus_narrative.py](../../../notebooks/_build_01_bus_narrative.py) 同结构。
 
 | # | 标题 | 关键操作 |
 |---|---|---|
@@ -412,7 +412,7 @@ from .feasibility import journey_feasibility
 
 ## 6. PR description 必须包含
 
-沿用 [AGENTS.md §6](../../../AGENTS.md)：
+沿用 [AGENTS.md §6](../../../../AGENTS.md)：
 
 ```markdown
 ## Summary

@@ -4,7 +4,7 @@
 
 `mobility/bus/` 已按 [01_bus_redesign.md](01_bus_redesign.md) 重写完毕，8/8 测试已通过、notebook `01_single_bus_simulation.ipynb` 4.1s 跑完。但代码 review 发现 3 个会埋雷的真问题 + 1 个交付不完整的小项需要在合并前修掉。
 
-继承约束：仓库根 [AGENTS.md](../../../AGENTS.md) 全部硬规则（单位后缀 / RNG / parquet / 不引入 `holidays/geopandas`）。本 PR 不允许改动 [01_bus_redesign.md](01_bus_redesign.md) 已落地的接口签名以外的任何东西——只修以下 4 项。
+继承约束：仓库根 [AGENTS.md](../../../../AGENTS.md) 全部硬规则（单位后缀 / RNG / parquet / 不引入 `holidays/geopandas`）。本 PR 不允许改动 [01_bus_redesign.md](01_bus_redesign.md) 已落地的接口签名以外的任何东西——只修以下 4 项。
 
 ---
 
@@ -12,7 +12,7 @@
 
 ### 现状
 
-[tests/mobility/bus/test_block_inference_bitexact.py](../../tests/mobility/bus/test_block_inference_bitexact.py) 只对**第一个** `(agency_id, service_id)` 分组做断言。这能过的唯一原因是：`infer_blocks` 内部 `block_counter` 从 0 开始递增，而被测分组在原始全表运行中也恰好是第一个被迭代的。换第二个分组，生成的 `INF_<agency>_<svc>_000000` 会与 parquet 里实际存的 `INF_<agency>_<svc>_017842` 之类的不等——测试会立刻崩。所以这个测试**没有真正在校验 1000 个 block** 的 bit-exact，反而给人虚假的安全感。
+[tests/mobility/bus/test_block_inference_bitexact.py](../../../tests/mobility/bus/test_block_inference_bitexact.py) 只对**第一个** `(agency_id, service_id)` 分组做断言。这能过的唯一原因是：`infer_blocks` 内部 `block_counter` 从 0 开始递增，而被测分组在原始全表运行中也恰好是第一个被迭代的。换第二个分组，生成的 `INF_<agency>_<svc>_000000` 会与 parquet 里实际存的 `INF_<agency>_<svc>_017842` 之类的不等——测试会立刻崩。所以这个测试**没有真正在校验 1000 个 block** 的 bit-exact，反而给人虚假的安全感。
 
 [01_bus_redesign.md §3](01_bus_redesign.md) 原文要求："抽 1000 个 inferred block 的 input frame，新函数重跑，断言 `block_id` 序列与 parquet 中的现存值完全一致"。
 
@@ -53,7 +53,7 @@ assert expected == observed
 
 ### 现状
 
-[mobility/bus/sim_adapter.py:81-87](../../mobility/bus/sim_adapter.py#L81) 的 `_add_load`：
+[mobility/bus/sim_adapter.py:81-87](../../../mobility/bus/sim_adapter.py#L81) 的 `_add_load`：
 
 ```python
 def _add_load(fleet_load_kw, block_load_kw):
@@ -112,7 +112,7 @@ def _add_load(fleet_load_kw: np.ndarray, block_load_kw: np.ndarray) -> np.ndarra
 
 ### 现状
 
-`Modelling/CHANGELOG.md` 不存在，仓库根 `CHANGELOG.md` 也不存在。[AGENTS.md §6.2](../../../AGENTS.md) 要求每个阶段 PR 必须追加一条 changelog。
+`Modelling/CHANGELOG.md` 不存在，仓库根 `CHANGELOG.md` 也不存在。[AGENTS.md §6.2](../../../../AGENTS.md) 要求每个阶段 PR 必须追加一条 changelog。
 
 ### 要做的事
 
@@ -152,11 +152,11 @@ All notable changes to the Modelling package.
 
 ### 现状
 
-[notebooks/01_single_bus_simulation.ipynb](../../notebooks/01_single_bus_simulation.ipynb) 在 Stage F (sensitivity heatmap) 之后直接 `print(f"Notebook runtime: ...")` 收尾。[01_bus_redesign.md §4](01_bus_redesign.md) 要求 Stage H "13 个数字的 markdown 表 + wall-clock"。
+[notebooks/01_single_bus_simulation.ipynb](../../../notebooks/01_single_bus_simulation.ipynb) 在 Stage F (sensitivity heatmap) 之后直接 `print(f"Notebook runtime: ...")` 收尾。[01_bus_redesign.md §4](01_bus_redesign.md) 要求 Stage H "13 个数字的 markdown 表 + wall-clock"。
 
 ### 要做的事
 
-在 [notebooks/_build_01_bus_narrative.py](../_build_01_bus_narrative.py) 的最后一个 code cell（sensitivity 那一节）**之前**插入一个 `print(...)` 之前的新 cell，再插一个 `## H. Final identity card` markdown header。具体：
+在 [notebooks/_build_01_bus_narrative.py](../../../notebooks/_build_01_bus_narrative.py) 的最后一个 code cell（sensitivity 那一节）**之前**插入一个 `print(...)` 之前的新 cell，再插一个 `## H. Final identity card` markdown header。具体：
 
 1. 把当前最后一个 code cell（sensitivity）末尾的 `print(f"Notebook runtime: ...")` 删除——它要挪到 H 节末尾。
 2. 追加：
@@ -210,7 +210,7 @@ All notable changes to the Modelling package.
 
 ## 6. PR description 必须包含
 
-沿用 [AGENTS.md §6](../../../AGENTS.md)：
+沿用 [AGENTS.md §6](../../../../AGENTS.md)：
 
 ```markdown
 ## Summary

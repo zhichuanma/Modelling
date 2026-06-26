@@ -256,7 +256,7 @@ lsoa_attribution.chain_home_lsoa() / lsoa_view()  [end_lsoa 众数 + gap_ratio]
 ## 5. 关键建模假设与风险诊断
 
 ### 🟡 R1（已更正定级：原写"🔴最高/破坏核心目标"为**夸大**，特此更正）— 苏格兰 Data Zone 版本不一致
-> **更正说明**：初版报告把"苏格兰充电失败"这个**私家车** bug 的严重性错误平移到了 bus/coach。经核对：该问题的严重版本属于私家车（exact lsoa_code 匹配充电桩），根因见 `notebooks/_prompts/scotland_private_car_geography_fix_task_cn.md`，**已在 `mobility/cars/scotland_geography.py` + `mobility/cars/geography_preflight.py` 修复**（含 `SCOTLAND_DZ2011_RANGE=(6506,13481)`、`SCOTLAND_DZ2022_RANGE=(13482,20873)` 的版本判定与 best-fit 重映射）。bus/coach 并不会以同样方式失败。
+> **更正说明**：初版报告把"苏格兰充电失败"这个**私家车** bug 的严重性错误平移到了 bus/coach。经核对：该问题的严重版本属于私家车（exact lsoa_code 匹配充电桩），根因见 `docs/prompts/archive/scotland_private_car_geography_fix_task_cn.md`，**已在 `mobility/cars/scotland_geography.py` + `mobility/cars/geography_preflight.py` 修复**（含 `SCOTLAND_DZ2011_RANGE=(6506,13481)`、`SCOTLAND_DZ2022_RANGE=(13482,20873)` 的版本判定与 best-fit 重映射）。bus/coach 并不会以同样方式失败。
 
 - **数据事实（仍成立）**：EV 清单苏格兰码 `S01006506–S01013481` = **2011 DZ**；ONSPD `lsoa21` 苏格兰码 `S01013482–S01020873` = **2022 DZ**；多边形用 `SG_DataZone_Bdry_2022`。两区间不重叠；该 CSV 未重生成；bus/coach 直接读原始文件、未接 preflight、未引用 cars 的修复。
 - **为何对 bus/coach 不是头号风险**：
@@ -293,7 +293,7 @@ lsoa_attribution.chain_home_lsoa() / lsoa_view()  [end_lsoa 众数 + gap_ratio]
 ### 🟠 R9（2026-06-03 新增）— EV 清单 `count` 列语义被误解的连带风险
 - **事实**（已验证）：`EV_UK_LSOA_2025_with_energy.csv` **每行=一辆车**（`EV_ID` 唯一）；`count` 是该 `(LSOA, Model)` 组的车辆数、被抄在组内每行（100% 组内恒定）。真实 bus 车队 = **6,222**，coach = **201**。`sum(count)=Σ组大小²=45,276` 是平方膨胀，**无意义**。
 - **连带 bug 1（已确认）**：`mobility/coach/coach_fleet.py:sample_coach_ev(weight_by_count=True)`（默认）按 `count` 作抽样权重。由于 count=组大小、每行已是一辆车，这等于给每组施加 **组大小² 权重**，**系统性过采样大组**（应改为对行**等概率**抽样，或先去重到组再按真实台数加权）。
-- **连带 bug 2（潜在）**：bus depot-only 重构方案 `notebooks/_prompts/bus_depot_only_sample_refactor_prompt_cn.md` §3.3 "按 count 展开为逐辆 vehicle instances" 会造 **45,276 个幽灵车**（大组平方放大，如 93 辆组→8,649）。正解：直接把每行当一辆车，**不要展开**。
+- **连带 bug 2（潜在）**：bus depot-only 重构方案 `docs/prompts/archive/bus_depot_only_sample_refactor_prompt_cn.md` §3.3 "按 count 展开为逐辆 vehicle instances" 会造 **45,276 个幽灵车**（大组平方放大，如 93 辆组→8,649）。正解：直接把每行当一辆车，**不要展开**。
 - **影响**：之前一度把车队当成 45k、伦敦占比 77%/Merton 43%，均为 count² 假象；按车辆数(行数)真实占比为伦敦 ~50%、Merton 14.5%（见 §2.2）。
 
 ---

@@ -2,16 +2,16 @@
 
 ## 0. 上下文
 
-`mobility/bus/` 已被清空（见 `git log` 中删除 5 个 `.py` 的提交）。任务是按 [mobility/cars/](../../mobility/cars/) 的纪律重新设计这个子包，并交付一个**单 bus 单日**的叙事 notebook。
+`mobility/bus/` 已被清空（见 `git log` 中删除 5 个 `.py` 的提交）。任务是按 [mobility/cars/](../../../mobility/cars/) 的纪律重新设计这个子包，并交付一个**单 bus 单日**的叙事 notebook。
 
 冻结输入：
 
 - `outputs/all_blocks.parquet` (93 MB, 1,668,452 trips, 263,120 blocks, 17 列：`trip_id, agency_id, route_id, service_id, direction_id, block_id, block_source, start_h, end_h, distance_km, start_stop, end_stop, start_lat, start_lon, end_lat, end_lon, shape_id`)
 - 旧实现保留在 git history（commit `6299588` 之前）。`infer_blocks` 算法需 `git show 6299588:Modelling/mobility/bus/gtfs_parser.py` 取回
 
-核心约束遵循仓库根 [AGENTS.md](../../../AGENTS.md)：
+核心约束遵循仓库根 [AGENTS.md](../../../../AGENTS.md)：
 - 单位后缀 `_kw / _kwh / _soc / _km / _h` 强制
-- 时间常量从 [mobility/core/constants.py](../../mobility/core/constants.py) 导入，禁止魔法数 `0.25 / 0.5`
+- 时间常量从 [mobility/core/constants.py](../../../mobility/core/constants.py) 导入，禁止魔法数 `0.25 / 0.5`
 - 随机性走 `np.random.default_rng(seed)`，禁止 `np.random.seed`
 - 不引入 `holidays / geopandas / pyproj / shapely / pytz`
 - 新增列必须带单位后缀
@@ -224,7 +224,7 @@ from .selection import sample_protagonist_block, sample_contrast_block, render_b
 
 ## 4. Notebook — `notebooks/01_single_bus_simulation.ipynb`
 
-配套 builder `_build_01_bus_narrative.py`，与 [_build_00_modelling_narrative.py](../_build_00_modelling_narrative.py) 同结构（`md()` / `code()` helper，`nbf.write` 落盘）。可一键 `python _build_01_bus_narrative.py` 重生 `.ipynb`。
+配套 builder `_build_01_bus_narrative.py`，与 [_build_00_modelling_narrative.py](../../../notebooks/_build_00_modelling_narrative.py) 同结构（`md()` / `code()` helper，`nbf.write` 落盘）。可一键 `python _build_01_bus_narrative.py` 重生 `.ipynb`。
 
 ### 章节
 
@@ -260,13 +260,13 @@ from .selection import sample_protagonist_block, sample_contrast_block, render_b
 - 不要把 `block_inference.py` 改快、改默认参数或改打分顺序——任何变动必须在 PR description 单开 "Inference algorithm change" 段
 - 不要在任何文件里写 `np.random.seed` / `random.seed` / `random.choice` 的无 rng 调用
 - 不要把 cross-midnight trip 用 `df = df[df.end_h<24]` 过滤掉，必须走 §1.1 的拆分路径
-- 不要在 ParkingEvent 上新增字段而不带单位后缀（违反 [AGENTS.md](../../../AGENTS.md) §3.1）
+- 不要在 ParkingEvent 上新增字段而不带单位后缀（违反 [AGENTS.md](../../../../AGENTS.md) §3.1）
 - 不要把 stop-haversine 距离低估静默"修正"——这是已知偏差，本轮只标注不动它
 - 不要导入旧 `gtfs_parser.py` 中除 `infer_blocks` 之外的函数（`parse_gtfs_time / shape_length_km / build_trip_span` 等不再需要——`all_blocks.parquet` 已是处理后的输入）
 
 ---
 
-## 6. PR 交付物（沿用 [AGENTS.md](../../../AGENTS.md) §6）
+## 6. PR 交付物（沿用 [AGENTS.md](../../../../AGENTS.md) §6）
 
 1. **代码变更** 严格落在：
    - `Modelling/mobility/bus/{__init__,data_loader,block_inference,trip_chain_bus,sim_adapter,selection}.py`

@@ -54,7 +54,7 @@ Notebook 解释：
 
 **核心建模假设**（必须 markdown 首句声明）：
 
-> 本研究当前阶段把每条 bus block 的 "home LSOA" 定义为其 feed-year 内 `end_lsoa` 的众数；该 block 的 `depot_charge_kw`（来自 vehicle spec）即视为**该 LSOA 内一个 synthetic depot 的额定功率**。这是 depot 在本仿真中的 operational definition——"block 末班停靠的地方就是充电的地方"。每个 LSOA 的 depot 总容量 = 所有 home 在该 LSOA 的 block 的 `depot_charge_kw` 之和。该容量地图**完全从 simulation 反推**，不依赖外部 depot inventory；公共充电桩（OCM）当前**未纳入** bus 充电基础设施，因为它们并非为 bus 这类大功率长停留场景设计。两类放宽（公共桩 eligibility、utilization & queueing、real depot inventory）见 [`docs/bus_charging_next_steps.md`](../../docs/bus_charging_next_steps.md)。
+> 本研究当前阶段把每条 bus block 的 "home LSOA" 定义为其 feed-year 内 `end_lsoa` 的众数；该 block 的 `depot_charge_kw`（来自 vehicle spec）即视为**该 LSOA 内一个 synthetic depot 的额定功率**。这是 depot 在本仿真中的 operational definition——"block 末班停靠的地方就是充电的地方"。每个 LSOA 的 depot 总容量 = 所有 home 在该 LSOA 的 block 的 `depot_charge_kw` 之和。该容量地图**完全从 simulation 反推**，不依赖外部 depot inventory；公共充电桩（OCM）当前**未纳入** bus 充电基础设施，因为它们并非为 bus 这类大功率长停留场景设计。两类放宽（公共桩 eligibility、utilization & queueing、real depot inventory）见 [`docs/bus_charging_next_steps.md`](../../bus_charging_next_steps.md)。
 
 **归因规则要点**：
 

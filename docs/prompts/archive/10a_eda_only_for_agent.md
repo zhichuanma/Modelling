@@ -1,7 +1,7 @@
 # Task: Bus Depot EDA (PR-1 of `10_bus_depot_curves_plan.md`)
 
 You are working on a self-contained slice of a larger plan
-(`notebooks/_prompts/10_bus_depot_curves_plan.md`). **Only do PR-1**:
+(`docs/prompts/archive/10_bus_depot_curves_plan.md`). **Only do PR-1**:
 the exploratory analysis script that selects the per-depot block-count
 threshold. Do **not** implement PR-2 onwards.
 
@@ -28,7 +28,7 @@ listed under "Outputs" below. It does **not** run the bus simulator and does
 
 | File | Why |
 |---|---|
-| `notebooks/_prompts/10_bus_depot_curves_plan.md` | The parent plan. Read §1.3, §3 in full. §1.3 lists the locked design decisions you must honour. |
+| `docs/prompts/archive/10_bus_depot_curves_plan.md` | The parent plan. Read §1.3, §3 in full. §1.3 lists the locked design decisions you must honour. |
 | `mobility/core/spatial.py` | Source of `query_lsoa_polygons`, `nearest_lsoa_for_points`, `load_lsoa_centroids`. Use these to map `(lat, lon) → LSOA`. |
 | `mobility/bus/depot_registry.py` (function `_assign_lsoa`) | Existing example of LSOA resolution with polygon-then-centroid fallback. Mirror this pattern; do **not** invent a new one. |
 | `outputs/all_blocks.parquet` | Inputs. Columns include `trip_id, agency_id, route_id, service_id, block_id, block_source, start_h, end_h, distance_km, start_stop, end_stop, start_lat, start_lon, end_lat, end_lon, shape_id`. ~1.67M rows over ~215k blocks. |
