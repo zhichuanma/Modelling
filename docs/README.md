@@ -9,6 +9,7 @@ Current and archived documentation for the mobility simulation package.
 | `bus_charging_next_steps.md` | Follow-up notes for bus charging realism and future modelling. |
 | `bus_depot_curves_plan.md` | Current plan for bus depot charging curves. |
 | `coach_annual_next_steps.md` | Follow-up notes for annual coach simulation. |
+| `privatecar_station_queue.md` | Private-car public station queue model assumptions, outputs, and validation commands. |
 | `prompts/README.md` | Prompt archive index and prompt maintenance rules. |
 
 ## Archive

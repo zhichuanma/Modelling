@@ -39,6 +39,12 @@ from mobility.cars.station_matcher import (
     _build_lsoa_indices,
     match_stations_for_schedule,
 )
+from mobility.cars.station_queue import (
+    QueueModelConfig,
+    export_queue_outputs,
+    run_queue_model_for_events,
+    write_queue_model_report,
+)
 from mobility.cars.trip_chain import assign_year_schedules
 from mobility.cars.week_pattern import build_leisure_pool_index, build_library_index
 from mobility.core.constants import DEFAULT_CHEMISTRY, WARMUP_DAYS
@@ -2914,6 +2920,12 @@ def run_privatecar_station_curve_pipeline(
     checkpoint_chunks: bool = True,
     resume: bool = False,
     progress_interval: int = 0,
+    enable_queue_model: bool = False,
+    queue_connector_path: Path | str | None = None,
+    queue_fallback_connector_power_kw: float = 7.0,
+    queue_fallback_connector_count: int | None = None,
+    queue_allow_service_after_window: bool = False,
+    queue_max_delay_min: float | None = 0.0,
 ) -> dict:
     """Run the complete private-car station curve export pipeline."""
 
@@ -3511,6 +3523,63 @@ def run_privatecar_station_curve_pipeline(
             "charging_event_rows": len(charging_events),
         },
     )
+
+    queue_outputs: dict[str, pd.DataFrame] = {}
+    if enable_queue_model:
+        phase_start = time.perf_counter()
+        queue_config = QueueModelConfig(
+            time_resolution_minutes=TIME_RESOLUTION_MINUTES,
+            fallback_connector_power_kw=queue_fallback_connector_power_kw,
+            fallback_connector_count=queue_fallback_connector_count,
+            allow_service_after_window=queue_allow_service_after_window,
+            max_delay_min=queue_max_delay_min,
+        )
+        if queue_connector_path is not None:
+            connector_path = Path(queue_connector_path)
+            if not connector_path.exists():
+                raise FileNotFoundError(f"Queue connector table not found: {connector_path}")
+        else:
+            connector_path = data_path / "UK_OCM_connectors_expanded_with_bus_and_LAD_LSOA.csv"
+        connector_table = pd.read_csv(connector_path) if connector_path.exists() else None
+        queue_outputs = run_queue_model_for_events(
+            charging_events,
+            station_metadata,
+            baseline_station_curve=station_curve,
+            connector_table=connector_table,
+            config=queue_config,
+            year=year,
+        )
+        export_queue_outputs(
+            out,
+            year=year,
+            config=queue_config,
+            station_capacity=queue_outputs["station_capacity"],
+            queue_sessions=queue_outputs["queue_sessions"],
+            queue_curve_15min=queue_outputs["queue_curve_15min"],
+            queue_curve_hourly=queue_outputs["queue_curve_hourly"],
+            queue_summary=queue_outputs["queue_summary"],
+            queue_comparison=queue_outputs["queue_comparison"],
+        )
+        write_queue_model_report(
+            out,
+            year=year,
+            config=queue_config,
+            station_capacity=queue_outputs["station_capacity"],
+            queue_sessions=queue_outputs["queue_sessions"],
+            queue_summary=queue_outputs["queue_summary"],
+            queue_comparison=queue_outputs["queue_comparison"],
+        )
+        _record_profile(
+            profile_rows,
+            run_start_perf=run_start_perf,
+            phase_start_perf=phase_start,
+            phase="run_station_queue_model",
+            details={
+                "queue_session_rows": len(queue_outputs["queue_sessions"]),
+                "queue_curve_15min_rows": len(queue_outputs["queue_curve_15min"]),
+                "queue_summary_rows": len(queue_outputs["queue_summary"]),
+            },
+        )
     if write_web_json:
         phase_start = time.perf_counter()
         web_metrics = export_web_json_files(
@@ -3576,6 +3645,10 @@ def run_privatecar_station_curve_pipeline(
         metrics.notes.append(
             f"{len(failed_vehicle_rows)} vehicle(s) failed preflight validation and were not simulated; see failed_vehicles_{year}.csv."
         )
+    if enable_queue_model:
+        metrics.notes.append(
+            "Queue-aware station outputs were generated as additional files; baseline station curve files remain uncontrolled."
+        )
 
     phase_start = time.perf_counter()
     write_data_quality_report(
@@ -3618,5 +3691,6 @@ def run_privatecar_station_curve_pipeline(
         "profile": pd.DataFrame(profile_rows),
         "schedule_profile": pd.DataFrame(vehicle_schedule_profile_rows),
         "destination_lookup_summary": sampler.stats_snapshot(),
+        "queue_outputs": queue_outputs,
         "output_dir": out,
     }

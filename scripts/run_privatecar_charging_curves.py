@@ -98,6 +98,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--main-seed", type=int, default=20260422)
     parser.add_argument("--warmup-seed", type=int, default=20260423)
     parser.add_argument("--progress-interval", type=int, default=0)
+    parser.add_argument(
+        "--enable-queue-model",
+        action="store_true",
+        help="Generate additional queue-aware public station outputs after the baseline curve.",
+    )
+    parser.add_argument(
+        "--queue-connector-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional connector table with StationID/station_id plus Power_kW and optional Quantity. "
+            "If omitted, data/UK_OCM_connectors_expanded_with_bus_and_LAD_LSOA.csv is used when present."
+        ),
+    )
+    parser.add_argument(
+        "--queue-fallback-connector-power-kw",
+        type=float,
+        default=7.0,
+        help="Fallback synthetic connector power when connector-level data is unavailable.",
+    )
+    parser.add_argument(
+        "--queue-fallback-connector-count",
+        type=int,
+        default=None,
+        help="Optional fixed fallback connector count per station; otherwise inferred from station total capacity.",
+    )
+    parser.add_argument(
+        "--queue-allow-service-after-window",
+        action="store_true",
+        help="Allow queued sessions to continue beyond the original parking window up to --queue-max-delay-min.",
+    )
+    parser.add_argument(
+        "--queue-max-delay-min",
+        type=float,
+        default=0.0,
+        help="Maximum extra service time beyond parking window when --queue-allow-service-after-window is set.",
+    )
     parser.add_argument("--resume", action="store_true", help="Reuse completed chunk checkpoints in output-dir.")
     parser.add_argument(
         "--no-checkpoint",
@@ -245,6 +282,12 @@ def main() -> None:
             checkpoint_chunks=not args.no_checkpoint,
             resume=args.resume,
             progress_interval=args.progress_interval,
+            enable_queue_model=args.enable_queue_model,
+            queue_connector_path=args.queue_connector_path,
+            queue_fallback_connector_power_kw=args.queue_fallback_connector_power_kw,
+            queue_fallback_connector_count=args.queue_fallback_connector_count,
+            queue_allow_service_after_window=args.queue_allow_service_after_window,
+            queue_max_delay_min=args.queue_max_delay_min,
         )
     except GeographyPreflightError as exc:
         print("\n=== Private-car geography preflight failed ===", file=sys.stderr)
@@ -261,6 +304,11 @@ def main() -> None:
     print(f"station_summary_rows: {metrics.station_summary_row_count:,}")
     print(f"json_files: {metrics.json_file_count:,}")
     print(f"public_station_energy_kwh: {metrics.station_curve_energy_kwh:.3f}")
+    queue_outputs = result.get("queue_outputs", {})
+    queue_summary = queue_outputs.get("queue_summary") if queue_outputs else None
+    if queue_summary is not None:
+        print(f"queue_summary_rows: {len(queue_summary):,}")
+        print(f"queue_report: {Path(result['output_dir']) / f'queue_model_report_{args.year}.md'}")
     print(f"profile_log: {Path(result['output_dir']) / f'profiling_log_{args.year}.csv'}")
 
 
