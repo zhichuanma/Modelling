@@ -11,6 +11,8 @@ Current and archived documentation for the mobility simulation package.
 | `coach_annual_next_steps.md` | Follow-up notes for annual coach simulation. |
 | `privatecar_station_queue.md` | Private-car public station queue model assumptions, outputs, and validation commands. |
 | `prompts/README.md` | Prompt archive index and prompt maintenance rules. |
+| `status/ev_penetration_and_full_run_outputs_audit.md` | Current audit of actual EV penetration sources and Web bus/coach full-run artifacts. |
+| `status/privatecar_geography_status.md` | Current status of Scotland DZ2011 -> DZ2022 handling in private-car and related source-geography paths. |
 
 ## Archive
 

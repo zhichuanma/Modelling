@@ -3,6 +3,10 @@
 > 生成日期：2026-06-02 · 范围：`mobility/bus/`、`mobility/coach/`、相关 `scripts/`、`tests/`、`data/`、`outputs/`、`docs/`
 > 性质：**理解 / 梳理 / 诊断 / 提出讨论框架**，未对仿真代码做实质性修改（仅运行只读检查与轻量测试）。
 > 配套验证：本轮已运行 `pytest tests/coach/`（37 passed）与 `tests/mobility/bus/test_lsoa_attribution.py + test_feasibility.py`（11 passed），并对 Scotland 地理编码版本做了数据层验证（见 §5）。
+>
+> **2026-06-23 状态修正**：本报告中关于 Scotland DZ2011/DZ2022 mismatch 的旧风险描述已被当前代码状态替代。私家车 station-curve workflow 已通过 `mobility/cars/scotland_geography.py`、`mobility/cars/geography_preflight.py` 和 `mobility/cars/station_curves.py` 统一到 DZ2022；bus `source_lsoa_nearest` 路径已有 `mobility/core/spatial.py::load_extended_lsoa_centroids()` 的扩展质心兜底。当前状态见 `docs/status/privatecar_geography_status.md`。下文保留为历史复盘，但相关风险口径已修正。
+>
+> **2026-06-23 EV stock / full-run 状态修正**：`data/EV_UK_LSOA_2025_with_energy.csv` 是 synthetic/allocation fleet 和模型输入，不应再被称为 actual EV stock、actual EV distribution 或真实 EV penetration。实际 penetration/denominator/numerator 应优先来自 `../Data/EV_penetration/df_VEH0125.csv` 与 `df_VEH0135.csv`。同时，bus/coach depot-load full simulation artifacts 已在 `../Web/public/data/` 中可见；不要再把 coach 年度产物概括为 only smoke/sample。当前盘点见 `docs/status/ev_penetration_and_full_run_outputs_audit.md`。
 
 ---
 
@@ -10,7 +14,7 @@
 
 1. **Bus 与 Coach 现在都已经实现"全年（feed-year）仿真"**。旧记忆里"coach 只有单程仿真"已过时——coach 在 `eb56941..5871ef4`（task 1–8 + fix 1–4）补齐了 TxC 日历、first-fit chain、feed-year SoC、LSOA 归属，已有 37 个 coach 测试通过。
 2. **Bus 有两条并行管线**：M1 链式（`run_bus_pipeline.py`，含车辆指派 + SOC 级联求解）和 legacy 年度（`run_bus_annual.py`，全队 215k blocks 已跑过一次完整全年）。两者并存，M1 是更"真实"的方向但产物口径不同。
-3. **苏格兰 Data Zone 版本不一致（已更正定级——见下方更正说明）**：该问题的**严重版本属于私家车**，且**已在 `mobility/cars/scotland_geography.py` + `geography_preflight.py` 修复**。底层数据事实（EV 清单 Scotland=DZ2011 `S01006506–S01013481`、ONSPD 质心/多边形=DZ2022 `S01013482+`、两区间不重叠、CSV 未重生成、bus/coach 直接读原始文件）对 bus/coach 仍存在，但**不构成头号风险**：bus 充电匹配是空间就近（非 exact lsoa_code），唯一全量年度产物来自不碰 per-LSOA 编码的 legacy 管线。残留暴露很窄，见 §5 R1（已更正）。
+3. **苏格兰 Data Zone 版本不一致（当前已从 blocker 降级为已修复历史风险）**：该问题曾主要影响私家车 exact-code workflow，当前已在 `mobility/cars/scotland_geography.py` + `geography_preflight.py` + `station_curves.py` 修复并纳入测试；bus `source_lsoa_nearest` 路径已有 extended centroid fallback。后续重点是输出 provenance 与 exact-code 新路径的护栏，而不是把 Scotland mismatch 继续作为当前阻塞项。
 4. **核心抽象都偏"能跑通"而非"足够真实"的地方**：depot 是合成的（每 block 一个合成 depot 充电桩，或运营商质心虚拟 depot）；coach chain 是 first-fit 合成、非真实排班；公共充电桩（OCM/NCR）目前基本未接入 bus，coach 仅可选；LSOA "停车归属" 用的是 block/journey 终点 LSOA 的众数，是事后近似。
 5. **测试覆盖不均**：年度仿真、cross-midnight、deadhead、LSOA attach、feasibility 有较好覆盖；但 **`charger_registry.py`、`depot_registry.py`、`chain_resolver.py` 几乎没有单元测试**，只在 M1 集成测试里被间接触及。
 
@@ -75,7 +79,8 @@ OCM 充电桩 CSV ──► charger_registry.build_charger_registry()
                   (depot 合成桩 + 公共桩≥50kW)
                                   │
 EV_UK_LSOA CSV ─► vehicle_inventory.bridge_ev_lsoa_to_fleet()
-                  (按 LSOA 质心就近挂到 depot)  ⚠ 苏格兰编码不匹配
+                  (按 LSOA/extended centroid 就近挂到 depot;
+                   Scotland DZ2011 fallback 已由 load_extended_lsoa_centroids() 覆盖)
                                   │
         ┌─────────────────────────┴──────────────────────────┐
         ▼ M1 链式 (run_bus_pipeline.py)                         ▼ legacy 年度 (run_bus_annual.py)
@@ -96,7 +101,7 @@ EV_UK_LSOA CSV ─► vehicle_inventory.bridge_ev_lsoa_to_fleet()
 ### 2.2 原始数据来源与字段
 - **GTFS**（timetable）：`stop_times.txt`（站序、到发时刻，含 >24:00）、`trips.txt`（trip↔block_id↔service_id↔route）、`shapes.txt`（线形，用于距离）、`stops.txt`（坐标）、`calendar.txt`+`calendar_dates.txt`（服务日历）。`build_all_blocks.py:stream_trip_summary()` 单遍流式读取，距离优先用 shape haversine，否则用站间 haversine 累加。
 - **TxC garage XML**：`bus/txc_parser.py:parse_txc_garages()` 提取车库坐标（缺坐标时按邮编 geocode），按 NOC/运营商名匹配 GTFS agency。
-- **EV 车辆清单**：`data/EV_UK_LSOA_2025_with_energy.csv`（1.58M 行；**每行=一辆车，`EV_ID` 唯一**）。关键列：`EV_ID, LSOA_code, Model, count, Energy_kWh, DC_Power_kW, AC_Power_kW, efficiency_wh_per_km, vehicle_subtype`。⚠ **`count` 不是逐行车辆数，而是该 `(LSOA, Model)` 组的车辆数、抄在每行上**（组内恒定，已验证 100%）。真实 EV bus = **6,222 辆**（≈50% 在伦敦，14.5% 在 Merton），coach = 201 辆。**严禁 `sum(count)`（=Σ组大小²=45,276，平方膨胀）或"按 count 展开"**。详见 §5 R9。
+- **EV synthetic allocation fleet / model input**：`data/EV_UK_LSOA_2025_with_energy.csv`（1.58M 行；`EV_ID` 唯一）是根据全国汽车总量并结合人口加权分配生成的 synthetic/allocation fleet，不是 actual EV stock 或真实 EV spatial distribution。关键列：`EV_ID, LSOA_code, Model, count, Energy_kWh, DC_Power_kW, AC_Power_kW, efficiency_wh_per_km, vehicle_subtype`。⚠ **`count` 不是逐行车辆数，而是该 `(LSOA, Model)` 组的分配组大小、抄在组内每行上**（组内恒定，已验证 100%）。可用于模型输入/spec proxy/allocated demand proxy；actual regional EV numerator/denominator/penetration 应使用 `../Data/EV_penetration/`。**严禁 `sum(count)`（=Σ组大小²=45,276，平方膨胀）或"按 count 展开"**。详见 §5 R9 与 `docs/status/ev_penetration_and_full_run_outputs_audit.md`。
 - **OCM 公共充电桩**：`UK_OCM_stations_labeled.csv`（27k 行，`StationID, lat, lon, TotalCapacity_kW, Bands, lsoa_code, ...`）。
 
 ### 2.3 block / trip / stop / depot / layover / deadhead 建模
@@ -226,7 +231,7 @@ lsoa_attribution.chain_home_lsoa() / lsoa_view()  [end_lsoa 众数 + gap_ratio]
 - LSOA 归属精度低于 bus（无多边形）。
 
 ### 3.7 主要输出
-`all_coach_journeys.parquet` (14,041)、`all_coach_stop_sequences.parquet` (107,723)、`coach_annual_per_chain.parquet`、`coach_annual_load_profile.parquet`；目前 outputs 里多为 `coach_annual_smoke_*`（**仅 smoke 规模，未见全量年度产物**）。
+`all_coach_journeys.parquet` (14,041)、`all_coach_stop_sequences.parquet` (107,723)、`coach_annual_per_chain.parquet`、`coach_annual_load_profile.parquet`；本地 `outputs/` 里可能仍有 smoke/sample 产物，但截至 2026-06-23，server full-run 的 coach depot-load Web artifacts 已在 `../Web/public/data/depot_coach_index.json`、`Depots_coach.csv` 和 daily `results/*.json` 中可见。
 
 ---
 
@@ -241,32 +246,28 @@ lsoa_attribution.chain_home_lsoa() / lsoa_view()  [end_lsoa 众数 + gap_ratio]
 | 日历展开 | ✅ | ✅ | `bus/calendar.py` / `coach/calendar.py` | ✅ | — |
 | depot registry | 🟡(合成+虚拟) | ⬜(抽象 terminus) | `depot_registry.py` / — | ❌**无单测** | depot 非真实库存 |
 | charger registry | 🟡(depot 合成+OCM) | 🟡(OCM 可选) | `charger_registry.py` / `coach/charging_supply.py` | ❌**bus 无单测**；coach 有 | 公共桩接入 bus 未默认 |
-| 车辆清单/抽样 | ✅ | ✅ | `vehicle_inventory.py`,`vehicle_sampling.py` / `coach_fleet.py` | ✅ | **苏格兰 DZ 版本不匹配(§5)**；bus 默认放行 `unknown` subtype |
+| 车辆清单/抽样 | ✅ | ✅ | `vehicle_inventory.py`,`vehicle_sampling.py` / `coach_fleet.py` | ✅ | Scotland geography path 已有当前护栏，使用 source geography 时仍需记录 provenance；bus 默认放行 `unknown` subtype |
 | 车辆指派(M1) | ✅(贪心) | ⬜ | `vehicle_assignment.py` | 🟡(仅集成) | 无单测 pool/合成逻辑 |
 | 事件账本 | ✅ | (隐含于 schedule) | `event_ledger.py` | 🟡 | — |
 | SOC 求解 | ✅(L0–L4+合成) | 🟡(单遍+重试) | `chain_resolver.py`,`chain_soc.py` / `coach/annual_simulation.py` | ❌**resolver 几乎无单测** | 合成兜底"必成功"会掩盖真实不可行 |
-| 年度仿真 | ✅(legacy 全量) + ✅(M1 链式) | ✅(仅 smoke) | `bus/annual_simulation.py` / `coach/annual_simulation.py` | ✅ | 两条 bus 管线口径不同 |
+| 年度仿真 | ✅(legacy 全量) + ✅(M1 链式) | ✅(server full depot-load artifacts 已进 Web；本地 outputs 仍可能含 smoke/sample) | `bus/annual_simulation.py` / `coach/annual_simulation.py` | ✅ | 两条 bus 管线口径不同；Web artifact 与本地 outputs 需区分 |
 | feasibility 审计 | ✅ | ✅(单程) | `bus/feasibility.py` / `coach/feasibility.py` | ✅ | chain_soc 不做 CV，feasibility 做——两处口径差异 |
 | LSOA 归属 | 🟡(新模块未接入) | ✅ | `bus/lsoa_attribution.py`(**未跟踪/未接管线**) / `coach/lsoa_attribution.py` | ✅(新 bus 测试 11passed) | 用 end_lsoa 众数，事后近似 |
 | depot 充电曲线 | ⬜(仅 Step1 EDA) | ⬜ | `docs/bus_depot_curves_plan.md`,`explore_bus_depots.py` | — | Step2–4 仅设计稿 |
-| 全量年度产物 | ✅(bus_annual 215k) | ⬜(仅 smoke) | `outputs/*` | — | coach 未跑全量 |
+| 全量年度产物 | ✅(bus full depot-load Web artifacts + local annual outputs) | ✅(coach full depot-load Web artifacts；本地 `outputs/` 可能不完整) | `outputs/*`, `../Web/public/data/*` | — | 区分 server full run Web artifacts 与 local smoke/sample files |
 
 ---
 
 ## 5. 关键建模假设与风险诊断
 
-### 🟡 R1（已更正定级：原写"🔴最高/破坏核心目标"为**夸大**，特此更正）— 苏格兰 Data Zone 版本不一致
-> **更正说明**：初版报告把"苏格兰充电失败"这个**私家车** bug 的严重性错误平移到了 bus/coach。经核对：该问题的严重版本属于私家车（exact lsoa_code 匹配充电桩），根因见 `docs/prompts/archive/scotland_private_car_geography_fix_task_cn.md`，**已在 `mobility/cars/scotland_geography.py` + `mobility/cars/geography_preflight.py` 修复**（含 `SCOTLAND_DZ2011_RANGE=(6506,13481)`、`SCOTLAND_DZ2022_RANGE=(13482,20873)` 的版本判定与 best-fit 重映射）。bus/coach 并不会以同样方式失败。
+### ✅ R1（2026-06-23 状态修正）— Scotland Data Zone mismatch 已从当前 blocker 降级为已修复历史风险
+> **更正说明**：初版报告把"苏格兰充电失败"这个**私家车** bug 的严重性错误平移到了 bus/coach。当前代码已经把私家车 workflow 的严重版本修掉；本节保留原始诊断的背景，但不再把 Scotland mismatch 视为当前 blocker。
 
-- **数据事实（仍成立）**：EV 清单苏格兰码 `S01006506–S01013481` = **2011 DZ**；ONSPD `lsoa21` 苏格兰码 `S01013482–S01020873` = **2022 DZ**；多边形用 `SG_DataZone_Bdry_2022`。两区间不重叠；该 CSV 未重生成；bus/coach 直接读原始文件、未接 preflight、未引用 cars 的修复。
-- **为何对 bus/coach 不是头号风险**：
-  1. **bus 充电匹配是空间就近、不是 exact lsoa_code**：`chain_resolver._nearest_public_charger` 用 BallTree + haversine、≤200m（`chain_resolver.py:71-126`），depot 桩建在 depot 坐标上——"能否充电"不经过 lsoa_code。
-  2. **唯一全量年度产物 (`bus_annual_per_block.parquet`) 免疫**：`run_bus_annual.py` 用 `load_bus_vehicle_params`（stock 权重抽**参数**），不做 EV→LSOA→depot 桥接。
-- **残留的窄口径暴露（均非当前生产路径，需进一步核对）**：
-  - **(a) Bus M1** `bridge_ev_lsoa_to_fleet`（`vehicle_inventory.py:145`）：EV `source_lsoa`(2011)↔质心(2022) 在苏格兰零命中→苏格兰车辆 NaN 经纬度→挂不上 depot。**影响取决于 M1 是否全量运行并使用此桥接，需对照真实 M1 run 确认。**
-  - **(b) Coach** 可选 layover 充电：`annual_simulation.py:477` 用 exact 集合交 `chain_lsoas & eligible_layover_lsoas`，苏格兰会静默漏桩——但**默认关闭**，仅不可行链重试分支。
-  - (c) 跨模式 LSOA 级报表对齐。
-- **建议（降级为中等）**：若后续启用 bus M1 全量或 coach layover 充电，复用 cars 已有的 `scotland_geography` 重映射 + 加一个跨模式版本一致性护栏测试即可；当前 legacy 全量 bus 产物无需处理。
+- **Private-car 当前状态**：`mobility/cars/scotland_geography.py` 提供 DZ2011/DZ2022 版本判定与 area-weighted DZ2011 -> DZ2022 统一；`mobility/cars/station_curves.py` 在 geography preflight 之前调用 `unify_scotland_ev_home_lsoa_to_dz2022()`；`mobility/cars/geography_preflight.py` 在 crosswalk 应用且无 blocker 时输出最终版本 `Data Zone 2022`。
+- **测试护栏**：`tests/mobility/cars/test_geography_preflight.py` 覆盖 raw mismatch、修正后通过、以及 `S01006506` -> `S01013482/S01013483` 的 unification；`tests/mobility/core/test_extended_centroids.py` 覆盖 extended centroid priority。
+- **Bus source geography 当前状态**：`mobility/core/spatial.py::load_extended_lsoa_centroids()` 会把 ONSPD 中缺失的 Scotland DZ2011 `lsoa11` 代码补进扩展质心表；因此旧的 Scotland source-geography attach-depot 失败诊断不再代表当前 `source_lsoa_nearest` 路径。
+- **Bus charging matching 仍不依赖 exact lsoa_code**：公共充电匹配是空间就近，depot 桩建在 depot 坐标上；旧报告中把 exact-code mismatch 当成 bus 充电失败主因的表述已经过时。
+- **剩余工作**：新输出需要记录 Scotland geography provenance；如果启用 coach layover charging 或新增 exact-code bus/coach join，应补 path-specific assertion。现有旧产物若要作为当前结论引用，需要用当前代码重新跑或在报告中标明生成版本。
 
 ### 🟠 R2 — block 是否真实代表"一辆车一天"
 - native block 较可靠；inferred block 是贪心拼接（`block_inference.py`），可能把不同实体车拼到一起或拆开同一辆车。`compare_legacy_blocks.py` 有回归校验但不验证"物理车辆"真实性。需看 inferred 占比（建议在 `05_bus_annual_results.ipynb` 里按 `block_source` 分布核对）。
@@ -291,10 +292,10 @@ lsoa_attribution.chain_home_lsoa() / lsoa_view()  [end_lsoa 众数 + gap_ratio]
 - depot 桩功率取车辆 AC 中位数、默认 100kW（合成）；公共桩对 bus 基本未接入；coach chain first-fit 合成；deadhead 用直线距离无路网；`chain_soc` 不做 CV 而 feasibility 做；合成兜底车"必成功"会把真实不可行掩盖成"可行"。
 
 ### 🟠 R9（2026-06-03 新增）— EV 清单 `count` 列语义被误解的连带风险
-- **事实**（已验证）：`EV_UK_LSOA_2025_with_energy.csv` **每行=一辆车**（`EV_ID` 唯一）；`count` 是该 `(LSOA, Model)` 组的车辆数、被抄在组内每行（100% 组内恒定）。真实 bus 车队 = **6,222**，coach = **201**。`sum(count)=Σ组大小²=45,276` 是平方膨胀，**无意义**。
+- **事实（2026-06-23 更正）**：`EV_UK_LSOA_2025_with_energy.csv` 是 synthetic/allocation fleet；`EV_ID` 唯一但不代表 actual EV stock。`count` 是该 `(LSOA, Model)` 分配组大小、被抄在组内每行（100% 组内恒定）。过滤得到的 bus/minibus 或 coach 行数只能称为 synthetic allocated/model-input fleet size，不能称为真实 bus/coach EV stock。`sum(count)=Σ组大小²=45,276` 是平方膨胀，**无意义**。
 - **连带 bug 1（已确认）**：`mobility/coach/coach_fleet.py:sample_coach_ev(weight_by_count=True)`（默认）按 `count` 作抽样权重。由于 count=组大小、每行已是一辆车，这等于给每组施加 **组大小² 权重**，**系统性过采样大组**（应改为对行**等概率**抽样，或先去重到组再按真实台数加权）。
 - **连带 bug 2（潜在）**：bus depot-only 重构方案 `docs/prompts/archive/bus_depot_only_sample_refactor_prompt_cn.md` §3.3 "按 count 展开为逐辆 vehicle instances" 会造 **45,276 个幽灵车**（大组平方放大，如 93 辆组→8,649）。正解：直接把每行当一辆车，**不要展开**。
-- **影响**：之前一度把车队当成 45k、伦敦占比 77%/Merton 43%，均为 count² 假象；按车辆数(行数)真实占比为伦敦 ~50%、Merton 14.5%（见 §2.2）。
+- **影响**：之前一度把 synthetic allocation rows 或 `count` 聚合误读为真实车队/真实空间分布。后续报告必须区分 `actual`（来自 `../Data/EV_penetration/`）、`synthetic_allocated`（来自 EV allocation fleet）和 `proxy`（由模拟需求或二次推断得到）。
 
 ---
 
@@ -325,14 +326,15 @@ lsoa_attribution.chain_home_lsoa() / lsoa_view()  [end_lsoa 众数 + gap_ratio]
 
 ## 7. 面向后续讨论的方案框架（真实性优先）
 
-### 方案 A — 先修地理编码地基（强烈建议先做）
-- **思想**：统一全链路 LSOA/DZ 版本（推荐统一到 2021 LSOA + 2022 DZ），给 EV 清单加 2011→2022 DZ 映射；加一个"版本一致性"护栏测试。
-- **需要数据**：苏格兰 2011→2022 DZ best-fit lookup（NRS 官方）；England 2011→2021 LSOA lookup。
-- **改动模块**：`vehicle_inventory.py`、`coach_fleet.py`、`core/spatial.py`（或新增 `geography_version.py`）。
-- **优点**：直接修复核心目标在苏格兰失效的问题；成本低、收益高。
-- **风险**：lookup 是 best-fit，会引入轻微聚合误差。
-- **对输出影响**：苏格兰车辆/充电归属从"基本错误"变"可用"。
-- **适合先做原型**：✅ 最适合，几小时即可验证苏格兰命中率。
+### 方案 A — 保持地理版本护栏与输出 provenance（基础修复已完成）
+- **思想**：把 Scotland DZ2011 -> DZ2022 统一视为当前 geography contract 的一部分，并在新输出中记录 source/final geography version。
+- **已有基础**：`scotland_geography.py`、`geography_preflight.py`、`station_curves.py` 和 focused tests 已覆盖私家车 workflow；`load_extended_lsoa_centroids()` 已覆盖 bus source geography 的 DZ2011 fallback。
+- **后续需要数据/证据**：刷新产物时保留 geography report；如果新增 exact-code join，再补对应路径的版本一致性断言。
+- **改动模块**：优先是报告/输出 provenance；只有当新路径绕开现有 unification 或 extended centroid helper 时，才需要改 `vehicle_inventory.py`、`coach_fleet.py` 或调用侧。
+- **优点**：防止旧 mismatch 结论回流，同时避免重复修已经修好的核心路径。
+- **风险**：旧 outputs 仍可能来自修复前代码；引用旧结果时必须标注生成版本或重新运行。
+- **对输出影响**：从"修地理编码"转为"确认当前结果是否由已修复路径生成"。
+- **适合先做原型**：✅ 适合做轻量 validation/report，不需要直接重跑大型年度产物。
 
 ### 方案 B — 真实 depot / 充电基础设施替换合成层
 - **思想**：用真实运营商 depot（DfT/CPT/OS）替换虚拟质心 depot，并把 OCM 公共桩正式接入 bus（现已在 coach 部分实现）。落地 `docs/bus_depot_curves_plan.md` 的 Step 2–4。
@@ -356,7 +358,7 @@ lsoa_attribution.chain_home_lsoa() / lsoa_view()  [end_lsoa 众数 + gap_ratio]
 
 ## 8. 建议优先讨论/修改的 5 个问题
 
-1. **【地理版本，已更正】**苏格兰 DZ2011/2022 的**严重版本是私家车问题、且已修复**（`cars/scotland_geography.py`）。bus/coach 仅有窄口径残留（M1 EV→depot 桥接、coach 可选 layover），均非当前生产路径。**优先级降为中等**：仅在启用 bus M1 全量或 coach layover 充电时，复用 cars 的重映射并加跨模式一致性护栏测试。（详见 §5 R1 更正）
+1. **【地理版本，已解决但需保留护栏】**苏格兰 DZ2011/2022 的严重版本已经在私家车 workflow 修复，并且 bus `source_lsoa_nearest` 已有 extended centroid fallback。当前优先级是：保留 focused tests、在新输出里记录 geography provenance、对新增 exact-code join 增加路径级断言。（详见 §5 R1 状态修正）
 2. **【两条 bus 管线如何收敛】**`run_bus_annual.py`(legacy 全量) 与 `run_bus_pipeline.py`(M1 链式) 口径不同，最终发表用哪条？是否把 M1 的 depot/充电桩/deadhead 真实性回灌 legacy，或反之？
 3. **【depot 定义统一】**registry depot / charger depot 桩 / depot_curves 计划的"首站 LSOA depot" 三套定义需要敲定唯一口径（R4）。
 4. **【合成兜底的诚实性】**`chain_resolver` 合成车"必成功"与 coach layover 重试，会把真实不可行掩盖；讨论是否保留"真实不可行"标记并在产出中区分。

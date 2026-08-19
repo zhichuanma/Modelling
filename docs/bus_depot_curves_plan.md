@@ -165,7 +165,7 @@ def build_depot_lsoa_registry(
 | `n_blocks_total` | int | union |
 | `n_round_trip_blocks` | int | morning==night==此 LSOA 的 block 数 |
 | `round_trip_share` | float | `n_round_trip / n_blocks_total` |
-| `n_vehicles_ev_lsoa` | int | 来自 `EV_UK_LSOA_2025_with_energy.csv` 的 bus+minibus 计数（cross-check，不参与阈值） |
+| `n_vehicles_ev_lsoa` | int | 来自 `EV_UK_LSOA_2025_with_energy.csv` 的 bus+minibus **synthetic allocated fleet** 计数（model-input cross-check，不代表 actual EV stock，不参与阈值） |
 | `confidence` | str | `'high'` if `n_blocks_total ≥ high_confidence_min_blocks` AND `round_trip_share ≥ high_confidence_round_trip_share`；`'medium'` if `n_blocks_total ≥ min_blocks_per_depot`；其余在 Step 2 已经被过滤掉 |
 | `depot_source` | str | `'gtfs_block_endpoint_lsoa'` |
 
